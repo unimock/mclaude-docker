@@ -1,0 +1,35 @@
+#!/bin/sh
+
+if [ "$PWD" = "$HOME" ]; then
+  echo "Error: claude must not be run from the home directory." >&2
+  exit 1
+fi
+
+if [ ! -f  $HOME/.mclaude/.claude.json ] ; then
+  mkdir -p $HOME/.mclaude/
+  touch    $HOME/.mclaude/.claude.json
+fi
+TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
+
+# Allocate a TTY only when running interactively. With piped input
+# (e.g. `echo hi | mclaude -p`) stdin is not a TTY and `-t` would fail
+# with "the input device is not a TTY".
+TTY_FLAG=
+if [ -t 0 ] && [ -t 1 ]; then
+  TTY_FLAG=-t
+fi
+
+exec docker run -i $TTY_FLAG --rm -v $PWD:$PWD \
+                         -e CLAUDE_WORKDIR="$PWD" \
+                         -e CLAUDE_UID=$(id -u) \
+                         -e CLAUDE_GID=$(id -g) \
+                         -e TZ="$TZ_NAME" \
+                         -e TERM="${TERM:-xterm-256color}" \
+                         -e COLORTERM="${COLORTERM:-truecolor}" \
+                         -v /etc/localtime:/etc/localtime:ro \
+                         -v $HOME/.gitconfig:/home/claude/.gitconfig \
+                         -v $HOME/.mclaude/.claude:/home/claude/.claude \
+                         -v $HOME/.mclaude/.claude.json:/home/claude/.claude.json \
+                         -v /var/run/docker.sock:/var/run/docker.sock \
+                         mclaude /usr/local/bin/claude-wrapper "$@"
+

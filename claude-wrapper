@@ -1,0 +1,59 @@
+#!/bin/sh -e
+
+# workdir is provided via env (e.g. from docker compose), default for safety
+: "${CLAUDE_WORKDIR:=/src}"
+
+CLAUDE_UID="${CLAUDE_UID:-0}"
+CLAUDE_GID="${CLAUDE_GID:-0}"
+
+# Detect the Docker socket's GID and make sure a matching group exists, then
+# add `claude` to it (Docker-in-Docker without root). Only meaningful when we
+# drop to the unprivileged `claude` user; root is already in every group.
+add_claude_to_docker_group() {
+    DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
+    [ -n "$DOCKER_GID" ] && [ "$DOCKER_GID" -ne 0 ] || return 0
+    DOCKER_GROUP=$(getent group "$DOCKER_GID" | cut -d: -f1)
+    if [ -z "$DOCKER_GROUP" ]; then
+        groupadd -g "$DOCKER_GID" docker
+        DOCKER_GROUP=docker
+    fi
+    usermod -aG "$DOCKER_GROUP" claude >/dev/null
+}
+
+if [ "$CLAUDE_UID" -eq 0 ]; then
+    # The host user is root (uid 0). We can't remap the `claude` user onto
+    # uid 0 (that belongs to root), and dropping to the unprivileged `claude`
+    # user would leave the root-owned project and config files unwritable.
+    # So run Claude directly as root, where uid 0 == the host's uid 0 and file
+    # ownership lines up. The mounted config lives under /home/claude, so point
+    # HOME there.
+    export HOME=/home/claude
+    export TERM="${TERM:-xterm-256color}"
+    export COLORTERM="${COLORTERM:-truecolor}"
+    cd "$CLAUDE_WORKDIR"
+    exec /usr/local/bin/claude "$@"
+fi
+
+# --- non-root host user: remap `claude` to match, then drop privileges ---
+
+# make sure files are written with correct user ownership
+usermod -u "$CLAUDE_UID" claude >/dev/null
+
+# make sure files are written with correct group ownership
+if [ "$CLAUDE_GID" -ne 0 ]; then
+    groupmod -g "$CLAUDE_GID" claude >/dev/null
+fi
+
+add_claude_to_docker_group
+
+chown claude:claude /home/claude/.claude
+# Re-chown npm globals so claude can auto-update after UID/GID change above
+chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man 2>/dev/null || true
+
+# NOTE: the `--` is required. Without it, su (util-linux) permutes the
+# argument list and swallows anything starting with `-` (e.g. `-p`,
+# `--debug`) as its own options instead of passing them to claude. The
+# `--` ends su's option parsing so the trailing args reach the -c shell
+# as positional parameters ($@). No $0 token is passed (su uses `-`),
+# which claude ignores.
+exec su claude - -c "export TERM='${TERM:-xterm-256color}'; export COLORTERM='${COLORTERM:-truecolor}'; cd '$CLAUDE_WORKDIR' && exec /usr/local/bin/claude \"\$@\"" -- "$@"
