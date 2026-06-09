@@ -18,6 +18,10 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
     make \
     tzdata \
     g++ \
+    swaks \
+    libnet-ssleay-perl \
+    libio-socket-ssl-perl \
+    shellcheck \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # add more dependencies above if needed
 # Add Docker GPG key and repository for Debian

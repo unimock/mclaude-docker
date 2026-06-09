@@ -78,7 +78,7 @@ Copied to `/usr/local/bin` in the image. It:
 ### `Dockerfile` – image definition
 
 - Base: `debian:trixie-slim`
-- Installs, among others: Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client, vim, python3, g++, make
+- Installs, among others: Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client, vim, python3, g++, make, shellcheck, swaks (with TLS support)
 - Installs Claude Code globally via `npm install -g @anthropic-ai/claude-code`
 - Gives the `claude` user ownership of the npm globals (self-update without sudo)
 - Symlinks `claude` into `~/.local/bin/claude` to satisfy the `/doctor` health check
