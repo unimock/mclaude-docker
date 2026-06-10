@@ -10,6 +10,11 @@ services:
     image: mclaude:latest
     build: .
     container_name: mclaude
+    # PID 1 in keepalive mode is `tail -f /dev/null`, which installs no SIGTERM
+    # handler. The kernel ignores unhandled signals to PID 1, so `compose down`
+    # would block for the full 10s grace period before SIGKILL. tini (init)
+    # forwards SIGTERM to tail (now a child, default disposition) → instant stop.
+    init: true
     # Set up UID/GID + docker group as root, then stay alive instead of
     # launching claude. You attach and run claude yourself.
     command: ["/usr/local/bin/claude-wrapper", "--keepalive"]
