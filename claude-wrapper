@@ -48,6 +48,19 @@ start_sshd() {
     chmod 700 "$HOSTKEYS"
     chmod 600 "$HOSTKEYS"/ssh_host_*_key
 
+    # start_sshd runs as root in the entrypoint, so mkdir/ssh-keygen above leave
+    # these files root-owned in the host's ~/.mclaude/.longrunning volume. Hand
+    # them back to the host user (CLAUDE_UID:CLAUDE_GID; 0:0 == no-op for a root
+    # host) so the persisted keys aren't root-owned on the host. sshd still runs
+    # as root and reads the 600 keys fine regardless of owner.
+    chown -R "$CLAUDE_UID:$CLAUDE_GID" "$LRDIR"
+
+    # SSH starts a login shell in $HOME; drop a profile snippet so logins land
+    # in the workspace directory instead (matches docker-compose's working_dir,
+    # which only applies to PID 1 / `docker exec`, not to the sshd session).
+    printf 'cd "%s" 2>/dev/null || true\n' "$CLAUDE_WORKDIR" \
+        > /etc/profile.d/mclaude-workdir.sh
+
     # Privilege-separation directory required by sshd.
     mkdir -p /run/sshd
 
