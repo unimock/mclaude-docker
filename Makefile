@@ -13,3 +13,11 @@ install:  ## Install mclaude script
 shell:  ## Run shell inside container
 	docker run -it --rm -v $(PWD):/src -e CLAUDE_WORKDIR=/src -e TZ=$$(cat /etc/timezone) -v /etc/localtime:/etc/localtime:ro -v $(HOME)/.gitconfig:/home/claude/.gitconfig -v $(HOME)/.mclaude/.claude:/home/claude/.claude mclaude bash
 
+
+up:  ## Start the long-running container (needs .env; see docker-compose.yml)
+	docker compose up -d
+
+
+down:  ## Stop and remove the long-running container
+	docker compose down
+

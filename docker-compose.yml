@@ -1,0 +1,34 @@
+# Long-running mclaude container.
+#
+#   1. cp .env.example .env   and edit it (workspace path + your UID/GID)
+#   2. docker compose up -d    (or: make up)
+#   3. docker compose exec -u claude mclaude bash   then run `claude` inside
+#
+# Settings come from .env (compose reads it automatically). See .env.example.
+services:
+  mclaude:
+    image: mclaude:latest
+    build: .
+    container_name: mclaude
+    # Set up UID/GID + docker group as root, then stay alive instead of
+    # launching claude. You attach and run claude yourself.
+    command: ["/usr/local/bin/claude-wrapper", "--keepalive"]
+    # The workspace is bind-mounted at the SAME path inside the container so
+    # absolute paths line up (matching the wrapper's `-v $PWD:$PWD`). Logins
+    # land here.
+    working_dir: "${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}"
+    environment:
+      CLAUDE_WORKDIR: "${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}"
+      CLAUDE_UID: "${CLAUDE_UID:?set CLAUDE_UID in .env, run id -u}"
+      CLAUDE_GID: "${CLAUDE_GID:?set CLAUDE_GID in .env, run id -g}"
+      TZ: "${TZ:-UTC}"
+      TERM: "${TERM:-xterm-256color}"
+      COLORTERM: "${COLORTERM:-truecolor}"
+    volumes:
+      - "${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}:${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}"
+      - ${HOME}/.gitconfig:/home/claude/.gitconfig
+      - ${HOME}/.mclaude/.claude:/home/claude/.claude
+      - ${HOME}/.mclaude/.claude.json:/home/claude/.claude.json
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
