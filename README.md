@@ -111,6 +111,48 @@ claude
 make down         # or: docker compose down
 ```
 
+### SSH access (long-running mode)
+
+Besides `docker compose exec`, the long-running container runs an SSH daemon so you
+can log in over the network. **Login is pre-shared-key only** — no passwords, no root.
+
+**1. Authorize your key.** Append your public key to the authorized-keys file on the host
+(create the directory if it doesn't exist yet):
+
+```bash
+mkdir -p ~/.mclaude/.longrunning
+cat ~/.ssh/id_ed25519.pub >> ~/.mclaude/.longrunning/authorized-keys
+```
+
+**2. (Re)start the container** so sshd picks up the volume:
+
+```bash
+make up
+```
+
+On first start the container generates its SSH host keys into
+`~/.mclaude/.longrunning/hostkeys/` (they persist there across rebuilds, so the
+container's identity is stable and you won't get host-key-changed warnings).
+
+**3. Log in** as the `claude` user on the forwarded port (default `2222`, set
+`MCLAUDE_SSH_PORT` in `.env` to change it):
+
+```bash
+ssh -p 2222 claude@<docker-host>
+# inside the container — start working:
+cd my-project
+claude
+```
+
+Everything under `~/.mclaude/.longrunning/` on the host:
+
+| Host path                                       | Purpose                                  |
+|-------------------------------------------------|------------------------------------------|
+| `~/.mclaude/.longrunning/hostkeys/`             | sshd host keys (auto-generated, persisted)|
+| `~/.mclaude/.longrunning/authorized-keys`       | authorized public keys (you add these)   |
+
+SSH is wired up only in long-running mode; wrapper mode is ephemeral and has no daemon.
+
 The container runs the shared `claude-wrapper` entrypoint with `--keepalive`: it performs
 the same UID/GID and Docker-group setup as wrapper mode, then stays alive (`tail -f /dev/null`)
 instead of launching `claude`.
@@ -150,20 +192,29 @@ Copied to `/usr/local/bin` in the image. It:
 - detects the Docker socket's GID and adds `claude` to that group (Docker-in-Docker without root),
 - re-chowns the npm globals after the UID/GID change so `claude update` still works,
 - `cd`s into `CLAUDE_WORKDIR` and exec's `claude` as the `claude` user,
-- when called with `--keepalive` (long-running mode), does the setup above but then keeps
-  the container alive (`tail -f /dev/null`) instead of launching `claude`.
+- when called with `--keepalive` (long-running mode), does the setup above, starts the SSH
+  daemon (generating persistent host keys on first run), and then keeps the container alive
+  (`tail -f /dev/null`) instead of launching `claude`.
 
 ### `docker-compose.yml` – long-running service
 
 Defines the persistent container for long-running mode. It runs `claude-wrapper --keepalive`,
 mounts the workspace root (from `.env`) at the same path, wires up the same persistent state
-and Docker socket as wrapper mode, and reads `MCLAUDE_WORKDIR`/`CLAUDE_UID`/`CLAUDE_GID` from
-`.env`.
+and Docker socket as wrapper mode, mounts `~/.mclaude/.longrunning` (sshd host keys +
+authorized-keys) and forwards `MCLAUDE_SSH_PORT` (default `2222`) to the container's sshd,
+and reads `MCLAUDE_WORKDIR`/`CLAUDE_UID`/`CLAUDE_GID` from `.env`.
+
+### `sshd_config.mclaude` – SSH daemon config
+
+A self-contained sshd config used in long-running mode. `claude-wrapper` starts `sshd -f` with
+it, bypassing the distro defaults. Enforces pre-shared-key login only (no passwords, no root,
+`AllowUsers claude`), with host keys and the authorized-keys file read from the mounted
+`~/.mclaude/.longrunning` volume.
 
 ### `Dockerfile` – image definition
 
 - Base: `debian:trixie-slim`
-- Installs, among others: Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client, vim, python3, g++, make, shellcheck, swaks (with TLS support)
+- Installs, among others: Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client, openssh-server (sshd for long-running mode), vim, python3, g++, make, shellcheck, swaks (with TLS support)
 - Installs Claude Code globally via `npm install -g @anthropic-ai/claude-code`
 - Gives the `claude` user ownership of the npm globals (self-update without sudo)
 - Symlinks `claude` into `~/.local/bin/claude` to satisfy the `/doctor` health check
@@ -175,6 +226,7 @@ and Docker socket as wrapper mode, and reads `MCLAUDE_WORKDIR`/`CLAUDE_UID`/`CLA
 | `~/.mclaude/.claude/`     | `/home/claude/.claude/`       | Claude config, memory, sessions  |
 | `~/.mclaude/.claude.json` | `/home/claude/.claude.json`   | Claude auth token                |
 | `~/.gitconfig`            | `/home/claude/.gitconfig`     | Git identity                     |
+| `~/.mclaude/.longrunning/`| `/home/claude/.mclaude/.longrunning/` | sshd host keys + authorized-keys (long-running mode) |
 | `$PWD`                    | `$PWD` (same path)            | Project files                    |
 
 All Claude state lives under `~/.mclaude/` on the host and therefore persists across container runs.

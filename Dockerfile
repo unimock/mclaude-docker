@@ -12,6 +12,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
     jq \
     git \
     openssh-client \
+    openssh-server \
     sudo \
     vim \
     bash \
@@ -52,5 +53,7 @@ ENV PATH="/usr/local/bin:$PATH"
 ENV SHELL=/bin/bash
 WORKDIR /src
 COPY claude-wrapper /usr/local/bin/
+# Self-contained sshd config for long-running mode (pre-shared-key login only).
+COPY sshd_config.mclaude /etc/ssh/sshd_config.mclaude
 CMD ["/usr/local/bin/claude-wrapper"]
 

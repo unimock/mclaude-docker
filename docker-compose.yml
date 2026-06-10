@@ -29,11 +29,18 @@ services:
       TZ: "${TZ:-UTC}"
       TERM: "${TERM:-xterm-256color}"
       COLORTERM: "${COLORTERM:-truecolor}"
+    # SSH into the container with `ssh -p ${MCLAUDE_SSH_PORT} claude@<host>`.
+    # Login is pre-shared-key only; add your public key to
+    # ~/.mclaude/.longrunning/authorized-keys on the host.
+    ports:
+      - "${MCLAUDE_SSH_PORT:-2222}:22"
     volumes:
       - "${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}:${MCLAUDE_WORKDIR:?set MCLAUDE_WORKDIR in .env}"
       - ${HOME}/.gitconfig:/home/claude/.gitconfig
       - ${HOME}/.mclaude/.claude:/home/claude/.claude
       - ${HOME}/.mclaude/.claude.json:/home/claude/.claude.json
+      # Host keys + authorized-keys for the in-container sshd (long-running mode).
+      - ${HOME}/.mclaude/.longrunning:/home/claude/.mclaude/.longrunning
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
