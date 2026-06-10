@@ -44,6 +44,10 @@ RUN mkdir -p /home/claude/.local/bin && \
     ln -s /usr/local/bin/claude /home/claude/.local/bin/claude && \
     chown -R claude:claude /home/claude/.local
 
+# Inside the long-running container there is no Docker wrapper to call, but
+# muscle memory says `mclaude` — make it an alias for claude.
+RUN ln -s /usr/local/bin/claude /usr/local/bin/mclaude
+
 ENV PATH="/usr/local/bin:$PATH"
 ENV SHELL=/bin/bash
 WORKDIR /src
