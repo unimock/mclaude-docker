@@ -6,6 +6,15 @@
 CLAUDE_UID="${CLAUDE_UID:-0}"
 CLAUDE_GID="${CLAUDE_GID:-0}"
 
+# Long-running mode: do the same UID/GID/docker-group setup as usual, but keep
+# the container alive (PID 1 = tail) instead of exec'ing claude. You then attach
+# with `docker compose exec -u claude mclaude bash` and run `claude` inside.
+KEEPALIVE=0
+if [ "$1" = "--keepalive" ]; then
+    KEEPALIVE=1
+    shift
+fi
+
 # Detect the Docker socket's GID and make sure a matching group exists, then
 # add `claude` to it (Docker-in-Docker without root). Only meaningful when we
 # drop to the unprivileged `claude` user; root is already in every group.
@@ -20,6 +29,52 @@ add_claude_to_docker_group() {
     usermod -aG "$DOCKER_GROUP" claude >/dev/null
 }
 
+# Long-running mode only: bring up an SSH daemon so you can `ssh claude@host`
+# into the container instead of `docker exec`. Login is pre-shared-key only
+# (see /etc/ssh/sshd_config.mclaude). Host keys and the authorized-keys file
+# live in the mounted ~/.mclaude/.longrunning volume so they persist.
+start_sshd() {
+    LRDIR=/home/claude/.mclaude/.longrunning
+    HOSTKEYS="$LRDIR/hostkeys"
+    AUTHKEYS="$LRDIR/authorized-keys"
+
+    mkdir -p "$HOSTKEYS"
+
+    # Generate persistent host keys on first start (kept in the volume).
+    [ -f "$HOSTKEYS/ssh_host_ed25519_key" ] || \
+        ssh-keygen -q -t ed25519 -f "$HOSTKEYS/ssh_host_ed25519_key" -N ''
+    [ -f "$HOSTKEYS/ssh_host_rsa_key" ] || \
+        ssh-keygen -q -t rsa -b 4096 -f "$HOSTKEYS/ssh_host_rsa_key" -N ''
+    chmod 700 "$HOSTKEYS"
+    chmod 600 "$HOSTKEYS"/ssh_host_*_key
+
+    # start_sshd runs as root in the entrypoint, so mkdir/ssh-keygen above leave
+    # these files root-owned in the host's ~/.mclaude/.longrunning volume. Hand
+    # them back to the host user (CLAUDE_UID:CLAUDE_GID; 0:0 == no-op for a root
+    # host) so the persisted keys aren't root-owned on the host. sshd still runs
+    # as root and reads the 600 keys fine regardless of owner.
+    chown -R "$CLAUDE_UID:$CLAUDE_GID" "$LRDIR"
+
+    # SSH starts a login shell in $HOME; drop a profile snippet so logins land
+    # in the workspace directory instead (matches docker-compose's working_dir,
+    # which only applies to PID 1 / `docker exec`, not to the sshd session).
+    printf 'cd "%s" 2>/dev/null || true\n' "$CLAUDE_WORKDIR" \
+        > /etc/profile.d/mclaude-workdir.sh
+
+    # Privilege-separation directory required by sshd.
+    mkdir -p /run/sshd
+
+    if [ ! -s "$AUTHKEYS" ]; then
+        echo "mclaude: no public keys in $AUTHKEYS — SSH login is refused until you add one." >&2
+        echo "mclaude: append a key on the host, e.g. cat ~/.ssh/id_ed25519.pub >> ~/.mclaude/.longrunning/authorized-keys" >&2
+    fi
+
+    # Run in the foreground (-D) as a background job so its logs reach the
+    # container's stderr (docker compose logs); PID 1 stays tail -f /dev/null.
+    /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config.mclaude &
+    echo "mclaude: sshd started (pre-shared-key login as 'claude')." >&2
+}
+
 if [ "$CLAUDE_UID" -eq 0 ]; then
     # The host user is root (uid 0). We can't remap the `claude` user onto
     # uid 0 (that belongs to root), and dropping to the unprivileged `claude`
@@ -30,6 +85,11 @@ if [ "$CLAUDE_UID" -eq 0 ]; then
     export HOME=/home/claude
     export TERM="${TERM:-xterm-256color}"
     export COLORTERM="${COLORTERM:-truecolor}"
+    add_claude_to_docker_group
+    if [ "$KEEPALIVE" -eq 1 ]; then
+        start_sshd
+        exec tail -f /dev/null
+    fi
     cd "$CLAUDE_WORKDIR"
     exec /usr/local/bin/claude "$@"
 fi
@@ -49,6 +109,11 @@ add_claude_to_docker_group
 chown claude:claude /home/claude/.claude
 # Re-chown npm globals so claude can auto-update after UID/GID change above
 chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man 2>/dev/null || true
+
+if [ "$KEEPALIVE" -eq 1 ]; then
+    start_sshd
+    exec tail -f /dev/null
+fi
 
 # NOTE: the `--` is required. Without it, su (util-linux) permutes the
 # argument list and swallows anything starting with `-` (e.g. `-p`,

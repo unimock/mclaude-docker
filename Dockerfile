@@ -12,6 +12,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
     jq \
     git \
     openssh-client \
+    openssh-server \
     sudo \
     vim \
     bash \
@@ -44,9 +45,15 @@ RUN mkdir -p /home/claude/.local/bin && \
     ln -s /usr/local/bin/claude /home/claude/.local/bin/claude && \
     chown -R claude:claude /home/claude/.local
 
+# Inside the long-running container there is no Docker wrapper to call, but
+# muscle memory says `mclaude` — make it an alias for claude.
+RUN ln -s /usr/local/bin/claude /usr/local/bin/mclaude
+
 ENV PATH="/usr/local/bin:$PATH"
 ENV SHELL=/bin/bash
 WORKDIR /src
 COPY claude-wrapper /usr/local/bin/
+# Self-contained sshd config for long-running mode (pre-shared-key login only).
+COPY sshd_config.mclaude /etc/ssh/sshd_config.mclaude
 CMD ["/usr/local/bin/claude-wrapper"]
 
