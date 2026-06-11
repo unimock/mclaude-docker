@@ -10,30 +10,6 @@ if [ ! -f  $HOME/.mclaude/.claude.json ] ; then
   touch    $HOME/.mclaude/.claude.json
 fi
 
-# Seed a default project config when the current directory has none yet.
-if [ ! -f ./.claude/settings.json ] ; then
-  mkdir -p ./.claude
-  cat > ./.claude/settings.json <<'EOF'
-{
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "model": "claude-opus-4-8",
-  "autoMemory": false,
-  "permissions": {
-    "autoApprove": {
-      "readFiles": true,
-      "listFiles": true,
-      "viewWebpage": true,
-      "runReadOnlyCommands": true
-    }
-  },
-  "git": {
-    "suggestCommitMessages": true,
-    "autoStage": false
-  }
-}
-EOF
-  echo "Created default Claude config at ./.claude/settings.json" >&2
-fi
 TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
 
 # Allocate a TTY only when running interactively. With piped input

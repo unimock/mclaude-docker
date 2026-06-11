@@ -55,9 +55,6 @@ echo "Summarize the README" | mclaude -p
 
 > **Note:** `mclaude` refuses to start from your home directory (`$HOME`) to prevent accidentally mounting your entire home.
 
-On first run in a project, if `./.claude/settings.json` doesn't exist, `mclaude` creates it
-with a sensible default config and prints a notice. An existing config is left untouched.
-
 ## Long-running mode
 
 Instead of one container per command, keep a single container running and log into it
@@ -177,7 +174,6 @@ Three files do the real work:
 Installed to `/usr/local/bin`. It:
 
 - refuses to run from `$HOME`,
-- seeds a default `./.claude/settings.json` in the current directory if one doesn't exist yet (printing a notice; an existing config is never overwritten),
 - bind-mounts `$PWD` at the same path inside the container (`-v $PWD:$PWD`) so absolute paths work correctly,
 - passes `CLAUDE_UID`/`CLAUDE_GID` so the container can match host ownership,
 - mounts `~/.mclaude/.claude` as a persistent config/state directory,
