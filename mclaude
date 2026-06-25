@@ -3,7 +3,7 @@
 # Version, baked in at deploy time (= the VERSION file). Wrapper users update solely by
 # deploying a new copy of this script: it reports this version AND pins the matching
 # image tag it runs, so the script is the single update vehicle (see README).
-MCLAUDE_VERSION="0.2.0"
+MCLAUDE_VERSION="0.2.1"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
 # `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
@@ -20,6 +20,12 @@ fi
 # Pre-create the config dir so Docker doesn't auto-create the bind-mount source
 # as a root-owned directory (which then needs an in-container chown to fix).
 mkdir -p $HOME/.mclaude/.claude
+
+# Claude Code keeps its primary state (login/OAuth, onboarding, projects, MCP
+# servers) in ~/.claude.json — a sibling of the .claude dir, NOT inside it. Touch
+# it as a FILE first so the bind-mount source exists; otherwise Docker would
+# auto-create it as a directory and claude would fail to write the JSON.
+[ -e $HOME/.mclaude/.claude.json ] || touch $HOME/.mclaude/.claude.json
 
 TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
 
@@ -41,6 +47,7 @@ exec docker run -i $TTY_FLAG --rm -v $PWD:$PWD \
                          -v /etc/localtime:/etc/localtime:ro \
                          -v $HOME/.gitconfig:/home/claude/.gitconfig \
                          -v $HOME/.mclaude/.claude:/home/claude/.claude \
+                         -v $HOME/.mclaude/.claude.json:/home/claude/.claude.json \
                          -v /var/run/docker.sock:/var/run/docker.sock \
                          "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper "$@"
 

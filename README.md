@@ -68,6 +68,7 @@ Workspace is mounted at the **same path** inside the container. Defaults: `TZ=UT
 
 ```bash
 mkdir -p ~/.mclaude/.claude
+touch ~/.mclaude/.claude.json     # must exist as a FILE before first start (see note below)
 ```
 
 **3. Run:**
@@ -111,7 +112,7 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 
 ## Architecture
 
-- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` at the same path; passes `CLAUDE_UID`/`CLAUDE_GID`; mounts `~/.mclaude/.claude` and the Docker socket; allocates a TTY only when interactive.
+- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` at the same path; passes `CLAUDE_UID`/`CLAUDE_GID`; mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json` and the Docker socket; allocates a TTY only when interactive.
 - **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID, adds it to the Docker-socket group, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
 - **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state/socket as wrapper mode, forwards port `2222`. Workspace path, UID/GID and SSH port are literals in the file (no `.env`).
 - **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers claude`, keys read from `~/.mclaude/.longrunning`.
@@ -122,11 +123,20 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 | Host path                  | Container path                        | Purpose                         |
 |----------------------------|---------------------------------------|---------------------------------|
 | `~/.mclaude/.claude/`      | `/home/claude/.claude/`               | Config, memory, sessions        |
+| `~/.mclaude/.claude.json`  | `/home/claude/.claude.json`           | Primary state: login/OAuth, onboarding, projects, MCP |
 | `~/.gitconfig`             | `/home/claude/.gitconfig`             | Git identity                    |
 | `~/.mclaude/.longrunning/` | `/home/claude/.mclaude/.longrunning/` | sshd keys + authorized-keys     |
 | `$PWD`                     | `$PWD` (same path)                    | Project files                   |
 
 All state lives under `~/.mclaude/` on the host and persists across runs.
+
+> **Note — `~/.claude.json` must be a file, not a directory.** Claude Code keeps
+> its primary state (login/OAuth, onboarding, projects, MCP servers) in
+> `~/.claude.json`, a *sibling* of the `.claude/` directory — not inside it. It is
+> mounted separately. Wrapper mode `touch`es it automatically; for long-running
+> mode you must `touch ~/.mclaude/.claude.json` once before `docker compose up`.
+> If it doesn't exist as a file, Docker auto-creates the bind-mount source as a
+> **directory** and Claude Code fails to write its config.
 
 ## Versioning & multi-arch builds
 

@@ -41,6 +41,10 @@ services:
       - /home/youruser/MyGits:/home/youruser/MyGits
       - ${HOME}/.gitconfig:/home/claude/.gitconfig
       - ${HOME}/.mclaude/.claude:/home/claude/.claude
+      # Claude's primary state file (login/OAuth, onboarding, projects, MCP).
+      # Must already exist as a FILE on the host, else Docker creates a dir here
+      # and claude fails to write it: touch ~/.mclaude/.claude.json
+      - ${HOME}/.mclaude/.claude.json:/home/claude/.claude.json
       - ${HOME}/.mclaude/.longrunning:/home/claude/.mclaude/.longrunning
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro
