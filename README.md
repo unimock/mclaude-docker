@@ -24,14 +24,16 @@ Same image, same `claude-wrapper` entrypoint, same state under `~/.mclaude/`. Th
 
 ## Installation
 
-Deploy the launcher; it pulls the image tag it pins (`unimock/mclaude:<version>`) from Docker Hub on first run:
+Deploy the launcher; it pulls the image tag it pins (`unimock/mclaude:<version>`) from Docker Hub on first run.
+
+**Install / update — straight from `main`** (one line, no clone):
 
 ```bash
-sudo install -pm755 mclaude /usr/local/bin/mclaude
+curl -fsSL https://raw.githubusercontent.com/unimock/mclaude-docker/main/mclaude | sudo install -pm755 /dev/stdin /usr/local/bin/mclaude
 ```
 
-**Update / uninstall:** redeploy the launcher (same command) / `sudo rm /usr/local/bin/mclaude`.
-Building the image yourself: see [Versioning](#versioning) / [Multi-arch builds](#multi-arch-builds).
+Or from a checkout: `sudo install -pm755 mclaude /usr/local/bin/mclaude`. **Uninstall:** `sudo rm /usr/local/bin/mclaude`.
+Building and publishing the image yourself: see [Versioning & multi-arch builds](#versioning--multi-arch-builds).
 
 ## Wrapper mode (default)
 
@@ -105,23 +107,7 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 | `docker compose down` | Stop and remove it |
 | `docker compose exec -u claude mclaude bash` | Shell into the running container |
 | `docker compose run --rm mclaude bash` | One-off throwaway shell |
-| `docker buildx bake --push` | Build+push multi-arch (see below) |
-
-## Multi-arch builds
-
-Platforms live in `build.x-bake.platforms` of `docker-compose.yml`.
-
-- **Local** — `docker compose build`: host arch only, loaded as `unimock/mclaude:latest`. (The local store can't hold a multi-platform image; multi-arch must target a registry.)
-- **Distribution** — `docker buildx bake --push`: both arches as one manifest, pushed to Docker Hub as `unimock/mclaude` (foreign arch via QEMU emulation).
-
-```bash
-docker login
-docker buildx create --name mclaude-builder --driver docker-container --bootstrap --use
-export VERSION="$(cat VERSION)"
-docker buildx bake --push                     # pushes :latest + :$VERSION
-```
-
-Tags, build args and platforms come from `docker-compose.yml`. Set the version vars ([Versioning](#versioning)) first; edit `tags` to push under a different name. For a full release (build+push **and** stamp the launcher), use `./release.sh` — see [Versioning](#versioning).
+| `docker buildx bake --push` | Build+push multi-arch (see [below](#versioning--multi-arch-builds)) |
 
 ## Architecture
 
@@ -129,7 +115,6 @@ Tags, build args and platforms come from `docker-compose.yml`. Set the version v
 - **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID, adds it to the Docker-socket group, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
 - **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state/socket as wrapper mode, forwards port `2222`. Workspace path, UID/GID and SSH port are literals in the file (no `.env`).
 - **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers claude`, keys read from `~/.mclaude/.longrunning`.
-- **`release.sh`** — build+push the multi-arch image to Docker Hub and stamp the version into the launcher; run after bumping `VERSION`.
 - **`Dockerfile`** — `debian:trixie-slim`; Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client/server, vim, python3(+pip/venv), g++, shellcheck; Claude Code via `npm install -g`; `claude` owns npm globals; passwordless sudo; `~/.local/bin/claude` symlink for `/doctor`.
 
 ## State and configuration
@@ -143,34 +128,55 @@ Tags, build args and platforms come from `docker-compose.yml`. Set the version v
 
 All state lives under `~/.mclaude/` on the host and persists across runs.
 
-## Versioning
+## Versioning & multi-arch builds
 
-Single source of truth: the **`VERSION`** file (SemVer, e.g. `0.1.1`) — no git involved. Two
-build vars read by `docker-compose.yml`:
+The **`VERSION`** file is the single source of truth (SemVer, e.g. `0.1.1`) — no git, no scripts.
+Two build vars read by `docker-compose.yml` carry it into the image:
 
 | Variable | Used for | Default |
 |----------|----------|---------|
 | `VERSION` | image tag, `MCLAUDE_VERSION` env var + OCI `version` label | `dev` |
 | `BUILD_DATE` | `org.opencontainers.image.created` label | `unknown` |
 
+Tags, build args and platforms (`build.x-bake.platforms`) all live in `docker-compose.yml`. The
+`mclaude` launcher carries the same version (top of the script) and pins the image tag it runs
+(`unimock/mclaude:<VERSION>`).
+
+**1. Bump the version** — edit the `VERSION` file, then set the build vars:
+
 ```bash
 export VERSION="$(cat VERSION)"
 export BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+**2. Build locally** (host arch only, loaded into the local image store):
+
+```bash
 docker compose build                          # tags :latest + :$VERSION
 ```
 
-The `mclaude` launcher carries the same version (top of the script) and pins the image tag it
-runs (`unimock/mclaude:<VERSION>`). Wrapper-mode users are updated **only** by redeploying it.
+The local store can't hold a multi-platform image, so multi-arch must target a registry — use
+step 3 to publish.
 
-**Release** — bump `VERSION`, then run `release.sh` (needs `docker login`):
+**3. Build + push multi-arch** (both arches as one manifest, foreign arch via QEMU emulation):
 
 ```bash
-./release.sh                                  # build+push multi-arch image, stamp mclaude
-git commit -am "release $(cat VERSION)" && git tag "v$(cat VERSION)"
+docker login
+docker buildx create --name mclaude-builder --driver docker-container --bootstrap --use
+docker buildx bake --push                     # pushes :latest + :$VERSION to Docker Hub
 ```
 
-`release.sh` pushes `unimock/mclaude:<VERSION>` + `:latest` and rewrites the launcher's
-`MCLAUDE_VERSION`. Wrapper users then update with `sudo install -pm755 mclaude /usr/local/bin/mclaude`.
+(Edit `tags` in `docker-compose.yml` to push under a different name.)
+
+**4. Stamp + ship the launcher** so wrapper-mode users get this version — they update **only** by
+redeploying it:
+
+```bash
+sed -i "s/^MCLAUDE_VERSION=.*/MCLAUDE_VERSION=\"${VERSION}\"/" mclaude
+sudo install -pm755 mclaude /usr/local/bin/mclaude
+```
+
+Check the installed versions:
 
 ```bash
 mclaude --mclaude-version                     # baked-in value, e.g. mclaude 0.1.1
