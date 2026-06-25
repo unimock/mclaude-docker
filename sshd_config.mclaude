@@ -1,0 +1,35 @@
+# mclaude long-running SSH daemon — pre-shared-key login ONLY.
+#
+# Started by claude-wrapper in --keepalive mode (see start_sshd()). sshd is run
+# with `-f` pointing at this file, so the distro's /etc/ssh/sshd_config and its
+# drop-ins are bypassed entirely and these settings are authoritative.
+
+Port 22
+AddressFamily any
+
+# Host keys live in the mounted volume (~/.mclaude/.longrunning/hostkeys on the
+# host) so the container's identity is stable across rebuilds and restarts.
+# claude-wrapper generates them on first start.
+HostKey /home/claude/.mclaude/.longrunning/hostkeys/ssh_host_ed25519_key
+HostKey /home/claude/.mclaude/.longrunning/hostkeys/ssh_host_rsa_key
+
+# --- Authentication: public key, and nothing else. ---
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+AuthorizedKeysFile /home/claude/.mclaude/.longrunning/authorized-keys
+
+# Only the working user may log in; root login is never allowed.
+PermitRootLogin no
+AllowUsers claude
+
+# The authorized-keys file and its parents come from a bind mount, so their
+# ownership/permissions are whatever the host produced. Skip sshd's strict
+# ownership checks rather than fight the mount; key-only auth still gates login.
+StrictModes no
+
+UsePAM yes
+LogLevel INFO
+PidFile /run/sshd/sshd.pid
+Subsystem sftp /usr/lib/openssh/sftp-server

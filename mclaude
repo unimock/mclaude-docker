@@ -1,0 +1,46 @@
+#!/bin/sh
+
+# Version, baked in at deploy time (= the VERSION file). Wrapper users update solely by
+# deploying a new copy of this script: it reports this version AND pins the matching
+# image tag it runs, so the script is the single update vehicle (see README).
+MCLAUDE_VERSION="0.1.1"
+MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
+
+# `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
+if [ "$1" = "--mclaude-version" ]; then
+  echo "mclaude ${MCLAUDE_VERSION}"
+  exit 0
+fi
+
+if [ "$PWD" = "$HOME" ]; then
+  echo "Error: claude must not be run from the home directory." >&2
+  exit 1
+fi
+
+# Pre-create the config dir so Docker doesn't auto-create the bind-mount source
+# as a root-owned directory (which then needs an in-container chown to fix).
+mkdir -p $HOME/.mclaude/.claude
+
+TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
+
+# Allocate a TTY only when running interactively. With piped input
+# (e.g. `echo hi | mclaude -p`) stdin is not a TTY and `-t` would fail
+# with "the input device is not a TTY".
+TTY_FLAG=
+if [ -t 0 ] && [ -t 1 ]; then
+  TTY_FLAG=-t
+fi
+
+exec docker run -i $TTY_FLAG --rm -v $PWD:$PWD \
+                         -e CLAUDE_WORKDIR="$PWD" \
+                         -e CLAUDE_UID=$(id -u) \
+                         -e CLAUDE_GID=$(id -g) \
+                         -e TZ="$TZ_NAME" \
+                         -e TERM="${TERM:-xterm-256color}" \
+                         -e COLORTERM="${COLORTERM:-truecolor}" \
+                         -v /etc/localtime:/etc/localtime:ro \
+                         -v $HOME/.gitconfig:/home/claude/.gitconfig \
+                         -v $HOME/.mclaude/.claude:/home/claude/.claude \
+                         -v /var/run/docker.sock:/var/run/docker.sock \
+                         "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper "$@"
+

@@ -1,0 +1,47 @@
+# Long-running mclaude container + the image build definition.
+#   Build: docker compose build      Run: docker compose up -d
+# Edit the workspace path / UID / GID below to match your host (id -u, id -g).
+services:
+  mclaude:
+    image: "unimock/mclaude:latest"
+    build:
+      context: .
+      # docker compose build uses these tags; docker buildx bake reads x-bake.
+      tags:
+        - "unimock/mclaude:latest"
+        - "unimock/mclaude:${VERSION:-dev}"
+      # Version (from the VERSION file) + build date baked into the MCLAUDE_VERSION
+      # env var and OCI labels.
+      args:
+        MCLAUDE_VERSION: "${VERSION:-dev}"
+        BUILD_DATE: "${BUILD_DATE:-unknown}"
+      x-bake:
+        platforms:
+          - linux/amd64
+          - linux/arm64
+    container_name: mclaude
+    hostname: mclaude
+    # tini reaps the keepalive process so `compose down` stops instantly.
+    init: true
+    # Root sets up UID/GID, then keeps the container alive; you run claude yourself.
+    command: ["/usr/local/bin/claude-wrapper", "--keepalive"]
+    # Workspace bind-mounted at the SAME path so absolute paths line up.
+    working_dir: /home/youruser/MyGits
+    environment:
+      CLAUDE_WORKDIR: /home/youruser/MyGits
+      CLAUDE_UID: "1000"
+      CLAUDE_GID: "1000"
+      TZ: UTC
+      TERM: xterm-256color
+      COLORTERM: truecolor
+    # sshd, pre-shared-key only: ssh -p 2222 claude@<host>.
+    ports:
+      - "2222:22"
+    volumes:
+      - /home/youruser/MyGits:/home/youruser/MyGits
+      - ${HOME}/.gitconfig:/home/claude/.gitconfig
+      - ${HOME}/.mclaude/.claude:/home/claude/.claude
+      - ${HOME}/.mclaude/.longrunning:/home/claude/.mclaude/.longrunning
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
