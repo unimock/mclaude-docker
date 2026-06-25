@@ -3,7 +3,7 @@
 # Version, baked in at deploy time (= the VERSION file). Wrapper users update solely by
 # deploying a new copy of this script: it reports this version AND pins the matching
 # image tag it runs, so the script is the single update vehicle (see README).
-MCLAUDE_VERSION="0.1.1"
+MCLAUDE_VERSION="0.2.0"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
 # `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
