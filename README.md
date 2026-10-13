@@ -140,19 +140,25 @@ All state lives under `~/.mclaude/` on the host and persists across runs.
 
 ## Versioning & multi-arch builds
 
-The **`VERSION`** file is the single source of truth (SemVer, e.g. `0.1.1`) — no git, no scripts.
+mclaude has **no version of its own** — it tracks the [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code)
+CLI release it bundles. The **`VERSION`** file is the single source of truth: it holds the exact
+`@anthropic-ai/claude-code` version to install (e.g. `2.1.296`), which the Dockerfile pins and which
+becomes the image tag, `MCLAUDE_VERSION` env var and OCI `version` label. No git, no scripts.
+
 Two build vars read by `docker-compose.yml` carry it into the image:
 
 | Variable | Used for | Default |
 |----------|----------|---------|
-| `VERSION` | image tag, `MCLAUDE_VERSION` env var + OCI `version` label | `dev` |
+| `VERSION` | pinned Claude Code release, image tag, `MCLAUDE_VERSION` env var + OCI `version` label | `dev` (installs latest) |
 | `BUILD_DATE` | `org.opencontainers.image.created` label | `unknown` |
 
 Tags, build args and platforms (`build.x-bake.platforms`) all live in `docker-compose.yml`. The
 `mclaude` launcher carries the same version (top of the script) and pins the image tag it runs
-(`unimock/mclaude:<VERSION>`).
+(`unimock/mclaude:<VERSION>`). Building with no `VERSION` set (`dev`) installs the latest Claude Code
+release instead of pinning one.
 
-**1. Bump the version** — edit the `VERSION` file, then set the build vars:
+**1. Pick a Claude Code release** — find the latest with `npm view @anthropic-ai/claude-code version`,
+write it into the `VERSION` file, then set the build vars:
 
 ```bash
 export VERSION="$(cat VERSION)"
@@ -189,8 +195,8 @@ sudo install -pm755 mclaude /usr/local/bin/mclaude
 Check the installed versions:
 
 ```bash
-mclaude --mclaude-version                     # baked-in value, e.g. mclaude 0.1.1
-mclaude --version                             # (no mclaude- prefix) Claude Code's own version
+mclaude --mclaude-version                     # baked-in value, e.g. mclaude 2.1.296
+mclaude --version                             # Claude Code's own version — now the same value
 ```
 
 ## Adding dependencies

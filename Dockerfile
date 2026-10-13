@@ -37,7 +37,17 @@ RUN useradd -m --shell /bin/bash --home-dir /home/claude claude
 # Let claude install packages (apt, pip, ...) without a password prompt.
 RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude && \
     chmod 0440 /etc/sudoers.d/claude
-RUN npm install -g @anthropic-ai/claude-code
+# Versioning: mclaude tracks the Claude Code CLI version it bundles — the VERSION
+# file IS the pinned @anthropic-ai/claude-code release. Passed in by `docker compose
+# build` from that file. Declared here (not earlier) so a version bump reinstalls
+# Claude Code + rebuilds the layers below, but keeps the apt layers above cached.
+# A `dev` fallback (no version passed) installs the latest release instead.
+ARG MCLAUDE_VERSION=dev
+RUN if [ "$MCLAUDE_VERSION" = "dev" ]; then \
+      npm install -g @anthropic-ai/claude-code; \
+    else \
+      npm install -g @anthropic-ai/claude-code@"$MCLAUDE_VERSION"; \
+    fi
 
 # Let the claude user manage global npm packages (npm install -g, claude update) without sudo
 RUN chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man
@@ -54,11 +64,9 @@ RUN ln -s /usr/local/bin/claude /usr/local/bin/mclaude
 ENV PATH="/usr/local/bin:$PATH"
 ENV SHELL=/bin/bash
 
-# Versioning: passed in by `docker compose build` from the VERSION file.
-# Declared late so a version bump doesn't bust the cache of the apt layers above.
-# Exposed both as an env var (readable inside the container) and as OCI labels
-# (readable via `docker inspect` / `mclaude --mclaude-version`).
-ARG MCLAUDE_VERSION=dev
+# Expose the bundled Claude Code version both as an env var (readable inside the
+# container) and as OCI labels (readable via `docker inspect` / `mclaude
+# --mclaude-version`). MCLAUDE_VERSION is already in scope from the ARG above.
 ARG BUILD_DATE=unknown
 ENV MCLAUDE_VERSION=$MCLAUDE_VERSION
 LABEL org.opencontainers.image.title="mclaude" \
