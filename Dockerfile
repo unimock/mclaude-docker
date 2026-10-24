@@ -1,17 +1,21 @@
 FROM debian:trixie-slim
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
+# Build-time only (ARG, not ENV): no interactive apt prompts during the build.
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     git \
     curl \
+    ca-certificates \
+    gpg \
     python3 \
     python3-pip \
     python3-venv \
     ripgrep \
     fd-find \
     jq \
-    git \
     openssh-client \
     openssh-server \
     sudo \
@@ -23,15 +27,17 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
     socat \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # add more dependencies above if needed
-# Add Docker GPG key and repository for Debian
-RUN apt-get update && apt-get install -y ca-certificates curl gnupg lsb-release && \
-    mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-# Install Docker CLI
-RUN apt-get update && apt-get install -y docker-ce-cli
-# Create user and install pi
+# Docker CLI from Docker's Debian repository (codename read from os-release).
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    . /etc/os-release && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
+      > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && apt-get install -y --no-install-recommends docker-ce-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Create the working user (UID/GID are remapped to the host user at runtime).
 RUN useradd -m --shell /bin/bash --home-dir /home/claude claude
 
 # Let claude install packages (apt, pip, ...) without a password prompt.
@@ -47,10 +53,12 @@ RUN if [ "$MCLAUDE_VERSION" = "dev" ]; then \
       npm install -g @anthropic-ai/claude-code; \
     else \
       npm install -g @anthropic-ai/claude-code@"$MCLAUDE_VERSION"; \
-    fi
-
-# Let the claude user manage global npm packages (npm install -g, claude update) without sudo
-RUN chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man
+    fi && \
+    npm cache clean --force && \
+    chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man
+# ^ Let the claude user manage global npm packages (npm install -g, claude update)
+#   without sudo. The chown must stay in the same RUN as the install: in a layer of
+#   its own it would copy the whole node_modules tree into the image a second time.
 
 # Satisfy the claude /doctor check which expects claude at ~/.local/bin/claude
 RUN mkdir -p /home/claude/.local/bin && \

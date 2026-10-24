@@ -17,6 +17,13 @@ Same image, same `claude-wrapper` entrypoint, same state under `~/.mclaude/`. Th
 | Scope | Current dir (`$PWD`) | A workspace root (many projects) |
 | For | Quick throwaway runs | Interactive sessions |
 
+## Security
+
+mclaude keeps your host **clean**, it is **not a sandbox**. The container gets the host's
+Docker socket (`/var/run/docker.sock`) and `claude` has passwordless sudo inside it — anything
+running in the container can start privileged containers and thus act as root on the host.
+Treat it with the same trust as running Claude Code directly on the host.
+
 ## Requirements
 
 - Docker + Compose plugin (`docker compose`)
@@ -48,6 +55,22 @@ echo "Summarize the README" | mclaude -p      # args + piped input pass through 
 
 Refuses to start from `$HOME` (avoids mounting your whole home).
 
+### Mount roots
+
+By default only `$PWD` is mounted. To give Claude a wider view, list "mount roots" in
+`~/.mclaude/mount-roots` — one absolute path per line, `~` allowed, `#` comments and blank lines ignored:
+
+```
+# mount the whole tree when mclaude runs anywhere below it
+~/MyGits
+/srv/work
+```
+
+If `$PWD` is a root or lies below one, that root is mounted (same path) while Claude still
+starts in `$PWD`. With nested roots the longest match wins; `/a/b` never matches `/a/bc`.
+A root of `/` or `$HOME` is refused. No match → just `$PWD`, as before. On first run `mclaude`
+creates the file as a commented-out template (no active entries); uncomment or add your roots.
+
 ## Long-running mode
 
 **1. Configure** — edit these literals in `docker-compose.yml` (workspace path appears 3×):
@@ -69,6 +92,7 @@ Workspace is mounted at the **same path** inside the container. Defaults: `TZ=UT
 ```bash
 mkdir -p ~/.mclaude/.claude
 touch ~/.mclaude/.claude.json     # must exist as a FILE before first start (see note below)
+touch ~/.gitconfig                # likewise (wrapper mode touches both automatically)
 ```
 
 **3. Run:**
@@ -112,7 +136,7 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 
 ## Architecture
 
-- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` at the same path; passes `CLAUDE_UID`/`CLAUDE_GID`; mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json` and the Docker socket; allocates a TTY only when interactive.
+- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` (or its matching [mount root](#mount-roots)) at the same path and starts claude in `$PWD`; passes `CLAUDE_UID`/`CLAUDE_GID`; mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json` and the Docker socket; allocates a TTY only when interactive.
 - **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID, adds it to the Docker-socket group, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
 - **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state/socket as wrapper mode, forwards port `2222`. Workspace path, UID/GID and SSH port are literals in the file (no `.env`).
 - **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers claude`, keys read from `~/.mclaude/.longrunning`.
@@ -125,8 +149,9 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 | `~/.mclaude/.claude/`      | `/home/claude/.claude/`               | Config, memory, sessions        |
 | `~/.mclaude/.claude.json`  | `/home/claude/.claude.json`           | Primary state: login/OAuth, onboarding, projects, MCP |
 | `~/.gitconfig`             | `/home/claude/.gitconfig`             | Git identity                    |
+| `~/.mclaude/mount-roots`   | —                                     | Optional wrapper-mode [mount roots](#mount-roots) (read by `mclaude` on the host) |
 | `~/.mclaude/.longrunning/` | `/home/claude/.mclaude/.longrunning/` | sshd keys + authorized-keys     |
-| `$PWD`                     | `$PWD` (same path)                    | Project files                   |
+| `$PWD` or mount root       | same path                             | Project files                   |
 
 All state lives under `~/.mclaude/` on the host and persists across runs.
 

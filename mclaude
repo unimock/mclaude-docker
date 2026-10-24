@@ -4,7 +4,7 @@
 # release). Wrapper users update solely by deploying a new copy of this script: it
 # reports this version AND pins the matching image tag it runs, so the script is the
 # single update vehicle (see README).
-MCLAUDE_VERSION="2.1.296"
+MCLAUDE_VERSION="2.1.310"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
 # `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
@@ -18,15 +18,74 @@ if [ "$PWD" = "$HOME" ]; then
   exit 1
 fi
 
+# Mount roots: if $PWD lies at or below a directory listed in
+# ~/.mclaude/mount-roots (one absolute path per line, `~` allowed, `#` comments),
+# mount that directory instead of just $PWD. claude still starts in $PWD
+# (CLAUDE_WORKDIR), but sees the whole tree. The longest matching entry wins.
+MOUNT_DIR="$PWD"
+MOUNT_ROOTS_FILE="$HOME/.mclaude/mount-roots"
+# First run: drop a commented-out template (no active entries → behaviour unchanged).
+if [ ! -e "$MOUNT_ROOTS_FILE" ]; then
+  mkdir -p "$HOME/.mclaude"
+  cat > "$MOUNT_ROOTS_FILE" <<'EOF'
+# mclaude mount roots
+#
+# If mclaude is started at or below one of these directories, the whole
+# directory is mounted into the container, while claude still starts in the
+# current directory. One absolute path per line, a leading ~ means $HOME.
+# The longest matching entry wins; / and $HOME itself are refused.
+#
+# Examples:
+#~/MyGits
+#/srv/work
+EOF
+fi
+if [ -f "$MOUNT_ROOTS_FILE" ]; then
+  found=
+  best=
+  # Default IFS trims surrounding whitespace; `|| [ -n ]` keeps a last line without newline.
+  while read -r root || [ -n "$root" ]; do
+    case "$root" in ''|'#'*) continue ;; esac
+    # shellcheck disable=SC2088  # matching a literal ~ on purpose
+    case "$root" in
+      '~')   root="$HOME" ;;
+      '~/'*) root="$HOME/${root#\~/}" ;;
+    esac
+    case "$root" in
+      /*) ;;
+      *) echo "mclaude: ignoring non-absolute mount root '$root' in $MOUNT_ROOTS_FILE" >&2; continue ;;
+    esac
+    # Strip trailing slashes ("/" becomes "", which matches everything below).
+    while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+    # Match on a path boundary: /a/b matches /a/b and /a/b/x, but not /a/bc.
+    case "$PWD/" in "$root"/*) ;; *) continue ;; esac
+    if [ -z "$found" ] || [ "${#root}" -gt "${#best}" ]; then
+      found=1
+      best="$root"
+    fi
+  done < "$MOUNT_ROOTS_FILE"
+  if [ -n "$found" ]; then
+    if [ -z "$best" ] || [ "$best" = "${HOME%/}" ]; then
+      echo "Error: mount root '${best:-/}' from $MOUNT_ROOTS_FILE would mount / or the home directory." >&2
+      exit 1
+    fi
+    MOUNT_DIR="$best"
+  fi
+fi
+
 # Pre-create the config dir so Docker doesn't auto-create the bind-mount source
 # as a root-owned directory (which then needs an in-container chown to fix).
-mkdir -p $HOME/.mclaude/.claude
+mkdir -p "$HOME/.mclaude/.claude"
 
 # Claude Code keeps its primary state (login/OAuth, onboarding, projects, MCP
 # servers) in ~/.claude.json — a sibling of the .claude dir, NOT inside it. Touch
 # it as a FILE first so the bind-mount source exists; otherwise Docker would
 # auto-create it as a directory and claude would fail to write the JSON.
-[ -e $HOME/.mclaude/.claude.json ] || touch $HOME/.mclaude/.claude.json
+[ -e "$HOME/.mclaude/.claude.json" ] || touch "$HOME/.mclaude/.claude.json"
+
+# Same pitfall for the mounted git identity: a missing ~/.gitconfig would be
+# auto-created by Docker as a root-owned directory and break git on the host.
+[ -e "$HOME/.gitconfig" ] || touch "$HOME/.gitconfig"
 
 TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
 
@@ -38,17 +97,17 @@ if [ -t 0 ] && [ -t 1 ]; then
   TTY_FLAG=-t
 fi
 
-exec docker run -i $TTY_FLAG --rm -v $PWD:$PWD \
+exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR" \
                          -e CLAUDE_WORKDIR="$PWD" \
-                         -e CLAUDE_UID=$(id -u) \
-                         -e CLAUDE_GID=$(id -g) \
+                         -e CLAUDE_UID="$(id -u)" \
+                         -e CLAUDE_GID="$(id -g)" \
                          -e TZ="$TZ_NAME" \
                          -e TERM="${TERM:-xterm-256color}" \
                          -e COLORTERM="${COLORTERM:-truecolor}" \
                          -v /etc/localtime:/etc/localtime:ro \
-                         -v $HOME/.gitconfig:/home/claude/.gitconfig \
-                         -v $HOME/.mclaude/.claude:/home/claude/.claude \
-                         -v $HOME/.mclaude/.claude.json:/home/claude/.claude.json \
+                         -v "$HOME/.gitconfig":/home/claude/.gitconfig \
+                         -v "$HOME/.mclaude/.claude":/home/claude/.claude \
+                         -v "$HOME/.mclaude/.claude.json":/home/claude/.claude.json \
                          -v /var/run/docker.sock:/var/run/docker.sock \
                          "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper "$@"
 
