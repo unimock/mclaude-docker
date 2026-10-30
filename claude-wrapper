@@ -5,10 +5,16 @@
 
 CLAUDE_UID="${CLAUDE_UID:-0}"
 CLAUDE_GID="${CLAUDE_GID:-0}"
+# Host user/group names; the image's `claude` user and group get renamed to these.
+CLAUDE_USER="${CLAUDE_USER:-claude}"
+CLAUDE_GROUP="${CLAUDE_GROUP:-claude}"
+
+# The user claude runs as. Stays `claude` unless renamed to CLAUDE_USER below.
+RUN_USER=claude
 
 # Long-running mode: do the same UID/GID/docker-group setup as usual, but keep
 # the container alive (PID 1 = tail) instead of exec'ing claude. You then attach
-# with `docker compose exec -u claude mclaude bash` and run `claude` inside.
+# with `docker compose exec -u <user> mclaude bash` and run `claude` inside.
 KEEPALIVE=0
 if [ "$1" = "--keepalive" ]; then
     KEEPALIVE=1
@@ -16,9 +22,9 @@ if [ "$1" = "--keepalive" ]; then
 fi
 
 # Detect the Docker socket's GID and make sure a matching group exists, then
-# add `claude` to it (Docker-in-Docker without root). Only meaningful when we
-# drop to the unprivileged `claude` user; root is already in every group.
-add_claude_to_docker_group() {
+# add user $1 to it (Docker-in-Docker without root). Only meaningful when we
+# drop to the unprivileged user; root is already in every group.
+add_user_to_docker_group() {
     DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)
     [ -n "$DOCKER_GID" ] && [ "$DOCKER_GID" -ne 0 ] || return 0
     DOCKER_GROUP=$(getent group "$DOCKER_GID" | cut -d: -f1)
@@ -26,10 +32,44 @@ add_claude_to_docker_group() {
         groupadd -g "$DOCKER_GID" docker
         DOCKER_GROUP=docker
     fi
-    usermod -aG "$DOCKER_GROUP" claude >/dev/null
+    usermod -aG "$DOCKER_GROUP" "$1" >/dev/null
 }
 
-# Long-running mode only: bring up an SSH daemon so you can `ssh claude@host`
+# A name we can safely hand to usermod/groupmod.
+valid_name() {
+    printf '%s\n' "$1" | grep -Eq '^[a-z_][a-z0-9_.-]*$'
+}
+
+# SSH client key of the container, kept in the mounted ~/.mclaude/.ssh. Generate
+# an ed25519 key on first start and print its public half so it can be added to
+# GitHub & co. $1 = key comment user, $2 = owner (uid:gid).
+ensure_ssh_key() {
+    SSHDIR=/home/claude/.ssh
+    mkdir -p "$SSHDIR"
+    if [ ! -f "$SSHDIR/id_ed25519" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C "$1@mclaude" -f "$SSHDIR/id_ed25519"
+        echo "mclaude: generated SSH key ~/.mclaude/.ssh/id_ed25519, public key:" >&2
+        cat "$SSHDIR/id_ed25519.pub" >&2
+    fi
+    # The ssh client refuses keys that are readable by others.
+    chown -R "$2" "$SSHDIR"
+    chmod 700 "$SSHDIR"
+    chmod 600 "$SSHDIR/id_ed25519"
+}
+
+# Docker client config with registry creds (`docker login` inside the
+# container), mounted from ~/.mclaude/.docker only where a trusted area (or the
+# compose file) asks for it. Hand it to the user and keep it private.
+# $1 = owner (uid:gid).
+fix_docker_config() {
+    DOCKERDIR=/home/claude/.docker
+    [ -d "$DOCKERDIR" ] || return 0
+    chown -R "$1" "$DOCKERDIR"
+    chmod 700 "$DOCKERDIR"
+    [ ! -f "$DOCKERDIR/config.json" ] || chmod 600 "$DOCKERDIR/config.json"
+}
+
+# Long-running mode only: bring up an SSH daemon so you can `ssh <user>@host`
 # into the container instead of `docker exec`. Login is pre-shared-key only
 # (see /etc/ssh/sshd_config.mclaude). Host keys and the authorized-keys file
 # live in the mounted ~/.mclaude/.longrunning volume so they persist.
@@ -71,8 +111,10 @@ start_sshd() {
 
     # Run in the foreground (-D) as a background job so its logs reach the
     # container's stderr (docker compose logs); PID 1 stays tail -f /dev/null.
-    /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config.mclaude &
-    echo "mclaude: sshd started (pre-shared-key login as 'claude')." >&2
+    # The login user is only known at runtime, hence AllowUsers here and not in
+    # the config file.
+    /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config.mclaude -o AllowUsers="$RUN_USER" &
+    echo "mclaude: sshd started (pre-shared-key login as '$RUN_USER')." >&2
 }
 
 if [ "$CLAUDE_UID" -eq 0 ]; then
@@ -85,7 +127,9 @@ if [ "$CLAUDE_UID" -eq 0 ]; then
     export HOME=/home/claude
     export TERM="${TERM:-xterm-256color}"
     export COLORTERM="${COLORTERM:-truecolor}"
-    add_claude_to_docker_group
+    add_user_to_docker_group "$RUN_USER"
+    ensure_ssh_key root 0:0
+    fix_docker_config 0:0
     if [ "$KEEPALIVE" -eq 1 ]; then
         start_sshd
         exec tail -f /dev/null
@@ -96,22 +140,59 @@ fi
 
 # --- non-root host user: remap `claude` to match, then drop privileges ---
 
+# The image user is the one with home /home/claude. It is `claude` on a fresh
+# container, but already renamed when a long-running container restarts.
+IMG_USER=$(awk -F: '$6 == "/home/claude" { print $1; exit }' /etc/passwd)
+
 # make sure files are written with correct user ownership
-usermod -u "$CLAUDE_UID" claude >/dev/null
+usermod -u "$CLAUDE_UID" "$IMG_USER" >/dev/null
 
 # make sure files are written with correct group ownership
 if [ "$CLAUDE_GID" -ne 0 ]; then
-    groupmod -g "$CLAUDE_GID" claude >/dev/null
+    IMG_GROUP=$(id -gn "$IMG_USER")
+    EXISTING_GROUP=$(getent group "$CLAUDE_GID" | cut -d: -f1)
+    if [ -n "$EXISTING_GROUP" ] && [ "$EXISTING_GROUP" != "$IMG_GROUP" ]; then
+        # The host GID already belongs to another group in the image (e.g. 100 =
+        # users): make that the primary group instead of renumbering ours.
+        usermod -g "$CLAUDE_GID" "$IMG_USER" >/dev/null
+    else
+        groupmod -g "$CLAUDE_GID" "$IMG_GROUP" >/dev/null
+        if [ "$CLAUDE_GROUP" != "$IMG_GROUP" ]; then
+            if valid_name "$CLAUDE_GROUP" && ! getent group "$CLAUDE_GROUP" >/dev/null; then
+                groupmod -n "$CLAUDE_GROUP" "$IMG_GROUP"
+            else
+                echo "mclaude: cannot use group name '$CLAUDE_GROUP', keeping '$IMG_GROUP'." >&2
+            fi
+        fi
+    fi
 fi
 
-add_claude_to_docker_group
+# Take over the host user name, unless it is invalid or taken in the image.
+RUN_USER="$IMG_USER"
+if [ "$CLAUDE_USER" != "$IMG_USER" ]; then
+    if valid_name "$CLAUDE_USER" && ! getent passwd "$CLAUDE_USER" >/dev/null; then
+        usermod -l "$CLAUDE_USER" "$IMG_USER"
+        RUN_USER="$CLAUDE_USER"
+    else
+        echo "mclaude: cannot use user name '$CLAUDE_USER', keeping '$IMG_USER'." >&2
+    fi
+fi
+
+# Passwordless sudo for whatever the user is called now.
+echo "$RUN_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude
+chmod 0440 /etc/sudoers.d/claude
+
+add_user_to_docker_group "$RUN_USER"
+ensure_ssh_key "$RUN_USER" "$RUN_USER:"
+fix_docker_config "$RUN_USER:"
 
 # Recursive: a non-recursive chown only fixes the top-level dir, so any files
 # left root-owned inside (e.g. from an earlier root / CLAUDE_UID=0 run) would
 # stay unwritable and break settings.json writes with "permission denied".
-chown -R claude:claude /home/claude/.claude
+# `user:` = the user's login group.
+chown -R "$RUN_USER:" /home/claude/.claude
 # Re-chown npm globals so claude can auto-update after UID/GID change above
-chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man 2>/dev/null || true
+chown -R "$RUN_USER:" /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man 2>/dev/null || true
 
 if [ "$KEEPALIVE" -eq 1 ]; then
     start_sshd
@@ -124,4 +205,4 @@ fi
 # `--` ends su's option parsing so the trailing args reach the -c shell
 # as positional parameters ($@). No $0 token is passed (su uses `-`),
 # which claude ignores.
-exec su claude - -c "export TERM='${TERM:-xterm-256color}'; export COLORTERM='${COLORTERM:-truecolor}'; cd '$CLAUDE_WORKDIR' && exec /usr/local/bin/claude \"\$@\"" -- "$@"
+exec su "$RUN_USER" - -c "export TERM='${TERM:-xterm-256color}'; export COLORTERM='${COLORTERM:-truecolor}'; cd '$CLAUDE_WORKDIR' && exec /usr/local/bin/claude \"\$@\"" -- "$@"

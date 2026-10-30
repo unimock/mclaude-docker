@@ -22,7 +22,8 @@ AuthorizedKeysFile /home/claude/.mclaude/.longrunning/authorized-keys
 
 # Only the working user may log in; root login is never allowed.
 PermitRootLogin no
-AllowUsers claude
+# AllowUsers is set by claude-wrapper on the sshd command line (the login
+# user is the host user name, only known at runtime).
 
 # The authorized-keys file and its parents come from a bind mount, so their
 # ownership/permissions are whatever the host produced. Skip sshd's strict

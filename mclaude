@@ -4,7 +4,7 @@
 # release). Wrapper users update solely by deploying a new copy of this script: it
 # reports this version AND pins the matching image tag it runs, so the script is the
 # single update vehicle (see README).
-MCLAUDE_VERSION="2.1.310"
+MCLAUDE_VERSION="2.1.314"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
 # `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
@@ -18,58 +18,114 @@ if [ "$PWD" = "$HOME" ]; then
   exit 1
 fi
 
-# Mount roots: if $PWD lies at or below a directory listed in
-# ~/.mclaude/mount-roots (one absolute path per line, `~` allowed, `#` comments),
-# mount that directory instead of just $PWD. claude still starts in $PWD
-# (CLAUDE_WORKDIR), but sees the whole tree. The longest matching entry wins.
+# Trusted areas: if $PWD lies at or below a directory listed in
+# ~/.mclaude/trusted_areas, mount that directory instead of just $PWD. claude
+# still starts in $PWD (CLAUDE_WORKDIR), but sees the whole tree. Each line is
+# `path | extra docker run args` (fields split on `|`, trailing fields optional,
+# `~` allowed, `#` comments). The longest matching entry wins, and only its args
+# are used. Nothing extra (e.g. the Docker socket) is mounted unless an area's
+# args ask for it.
 MOUNT_DIR="$PWD"
-MOUNT_ROOTS_FILE="$HOME/.mclaude/mount-roots"
+EXTRA_ARGS=
+TRUSTED_AREAS_FILE="$HOME/.mclaude/trusted_areas"
 # First run: drop a commented-out template (no active entries → behaviour unchanged).
-if [ ! -e "$MOUNT_ROOTS_FILE" ]; then
+if [ ! -e "$TRUSTED_AREAS_FILE" ]; then
   mkdir -p "$HOME/.mclaude"
-  cat > "$MOUNT_ROOTS_FILE" <<'EOF'
-# mclaude mount roots
+  cat > "$TRUSTED_AREAS_FILE" <<'EOT'
+# mclaude trusted areas
 #
 # If mclaude is started at or below one of these directories, the whole
 # directory is mounted into the container, while claude still starts in the
-# current directory. One absolute path per line, a leading ~ means $HOME.
-# The longest matching entry wins; / and $HOME itself are refused.
+# current directory. The longest matching entry wins; / and $HOME itself are
+# refused.
+#
+# Format: one area per line, fields separated by `|`, trailing fields optional:
+#   path | extra docker run args
+# The path is absolute, a leading ~ means $HOME. The args are split on
+# whitespace (no quoting, no globbing) and passed to `docker run`; in them a
+# ~/ at the start of a word or right after `:` or `=` also means $HOME.
+#
+# Docker inside the container (socket + registry creds for `docker login`/push)
+# is opt-in per area; the socket makes the area root-equivalent on the host:
+#   -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
 #
 # Examples:
-#~/MyGits
-#/srv/work
-EOF
+#~/MyGits      | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
+#~/web         | -p 8080:8080 -e FOO=bar
+#/srv/my work  | --network host
+#~/customer-x
+EOT
 fi
-if [ -f "$MOUNT_ROOTS_FILE" ]; then
+
+# Strip leading and trailing whitespace from $1.
+trim() {
+  _t="$1"
+  _t="${_t#"${_t%%[![:space:]]*}"}"
+  _t="${_t%"${_t##*[![:space:]]}"}"
+  printf '%s' "$_t"
+}
+
+# Expand ~/ in a trusted-area arg: at the start of the word and right after
+# each `:` or `=` (e.g. `-v ~/a:~/b`, `--env=DIR=~/x`). Nothing else expands.
+expand_tilde() {
+  _w="$1"
+  _o=
+  # shellcheck disable=SC2088  # matching a literal ~ on purpose
+  case "$_w" in
+    '~')   printf '%s' "$HOME"; return ;;
+    '~/'*) _o="$HOME/"; _w="${_w#\~/}" ;;
+  esac
+  while :; do
+    case "$_w" in
+      *[:=]'~/'*)
+        _pre="${_w%%[:=]\~/*}"
+        _w="${_w#"$_pre"}"
+        _sep="${_w%"${_w#?}"}"
+        _w="${_w#?\~/}"
+        _o="$_o$_pre$_sep$HOME/"
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_o$_w"
+}
+
+if [ -f "$TRUSTED_AREAS_FILE" ]; then
   found=
   best=
-  # Default IFS trims surrounding whitespace; `|| [ -n ]` keeps a last line without newline.
-  while read -r root || [ -n "$root" ]; do
-    case "$root" in ''|'#'*) continue ;; esac
+  best_args=
+  # `_rest` takes any further fields (reserved for future use). `|| [ -n ]`
+  # keeps a last line without newline.
+  while IFS='|' read -r area args _rest || [ -n "$area" ]; do
+    area=$(trim "$area")
+    case "$area" in ''|'#'*) continue ;; esac
+    args=$(trim "$args")
     # shellcheck disable=SC2088  # matching a literal ~ on purpose
-    case "$root" in
-      '~')   root="$HOME" ;;
-      '~/'*) root="$HOME/${root#\~/}" ;;
+    case "$area" in
+      '~')   area="$HOME" ;;
+      '~/'*) area="$HOME/${area#\~/}" ;;
     esac
-    case "$root" in
+    case "$area" in
       /*) ;;
-      *) echo "mclaude: ignoring non-absolute mount root '$root' in $MOUNT_ROOTS_FILE" >&2; continue ;;
+      *) echo "mclaude: ignoring non-absolute trusted area '$area' in $TRUSTED_AREAS_FILE" >&2; continue ;;
     esac
     # Strip trailing slashes ("/" becomes "", which matches everything below).
-    while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+    while [ "${area%/}" != "$area" ]; do area="${area%/}"; done
     # Match on a path boundary: /a/b matches /a/b and /a/b/x, but not /a/bc.
-    case "$PWD/" in "$root"/*) ;; *) continue ;; esac
-    if [ -z "$found" ] || [ "${#root}" -gt "${#best}" ]; then
+    case "$PWD/" in "$area"/*) ;; *) continue ;; esac
+    if [ -z "$found" ] || [ "${#area}" -gt "${#best}" ]; then
       found=1
-      best="$root"
+      best="$area"
+      best_args="$args"
     fi
-  done < "$MOUNT_ROOTS_FILE"
+  done < "$TRUSTED_AREAS_FILE"
   if [ -n "$found" ]; then
     if [ -z "$best" ] || [ "$best" = "${HOME%/}" ]; then
-      echo "Error: mount root '${best:-/}' from $MOUNT_ROOTS_FILE would mount / or the home directory." >&2
+      echo "Error: trusted area '${best:-/}' from $TRUSTED_AREAS_FILE would mount / or the home directory." >&2
       exit 1
     fi
     MOUNT_DIR="$best"
+    EXTRA_ARGS="$best_args"
   fi
 fi
 
@@ -83,9 +139,26 @@ mkdir -p "$HOME/.mclaude/.claude"
 # auto-create it as a directory and claude would fail to write the JSON.
 [ -e "$HOME/.mclaude/.claude.json" ] || touch "$HOME/.mclaude/.claude.json"
 
-# Same pitfall for the mounted git identity: a missing ~/.gitconfig would be
-# auto-created by Docker as a root-owned directory and break git on the host.
-[ -e "$HOME/.gitconfig" ] || touch "$HOME/.gitconfig"
+# The container's git identity lives in ~/.mclaude/.gitconfig. Create it before
+# mounting (else Docker auto-creates a root-owned directory); on first run seed it
+# from the host's ~/.gitconfig so the identity carries over.
+if [ ! -e "$HOME/.mclaude/.gitconfig" ]; then
+  if [ -f "$HOME/.gitconfig" ]; then
+    cp "$HOME/.gitconfig" "$HOME/.mclaude/.gitconfig"
+  else
+    touch "$HOME/.mclaude/.gitconfig"
+  fi
+fi
+
+# SSH client keys of the container (generated inside by claude-wrapper if missing).
+mkdir -p "$HOME/.mclaude/.ssh"
+chmod 700 "$HOME/.mclaude/.ssh"
+
+# Docker client config / registry creds (`docker login` inside the container).
+# Only mounted when a trusted area asks for it, but created here so Docker never
+# auto-creates the mount source as a root-owned directory.
+mkdir -p "$HOME/.mclaude/.docker"
+chmod 700 "$HOME/.mclaude/.docker"
 
 TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
 
@@ -97,17 +170,37 @@ if [ -t 0 ] && [ -t 1 ]; then
   TTY_FLAG=-t
 fi
 
+# Build the tail of the docker command in the positional parameters:
+#   <area args...> <image> claude-wrapper <claude args...>
+# EXTRA_ARGS (from trusted_areas) is split on whitespace on purpose; `set -f`
+# keeps a `*` in it from globbing. Each word is ~-expanded and kept as one word,
+# so a $HOME with spaces survives. The claude args are appended first and then
+# rotated behind the rest.
+n=$#
+set -f
+for word in $EXTRA_ARGS; do
+  set -- "$@" "$(expand_tilde "$word")"
+done
+set -- "$@" "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper
+while [ "$n" -gt 0 ]; do
+  set -- "$@" "$1"
+  shift
+  n=$((n - 1))
+done
+
 exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR" \
                          -e CLAUDE_WORKDIR="$PWD" \
                          -e CLAUDE_UID="$(id -u)" \
                          -e CLAUDE_GID="$(id -g)" \
+                         -e CLAUDE_USER="$(id -un)" \
+                         -e CLAUDE_GROUP="$(id -gn)" \
                          -e TZ="$TZ_NAME" \
                          -e TERM="${TERM:-xterm-256color}" \
                          -e COLORTERM="${COLORTERM:-truecolor}" \
                          -v /etc/localtime:/etc/localtime:ro \
-                         -v "$HOME/.gitconfig":/home/claude/.gitconfig \
+                         -v "$HOME/.mclaude/.gitconfig":/home/claude/.gitconfig \
+                         -v "$HOME/.mclaude/.ssh":/home/claude/.ssh \
                          -v "$HOME/.mclaude/.claude":/home/claude/.claude \
                          -v "$HOME/.mclaude/.claude.json":/home/claude/.claude.json \
-                         -v /var/run/docker.sock:/var/run/docker.sock \
-                         "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper "$@"
+                         "$@"
 

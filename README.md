@@ -4,6 +4,7 @@ Thin Docker wrapper that runs [Claude Code](https://claude.ai/code) in an isolat
 
 - **Clean host** – Node.js, npm and the CLI stay in the container.
 - **Correct ownership** – writes use the host UID/GID, no root-owned files.
+- **Host identity** – inside, the user and group carry the host's names (e.g. `mok:mok`), home stays `/home/claude`.
 
 ## Two modes
 
@@ -19,10 +20,14 @@ Same image, same `claude-wrapper` entrypoint, same state under `~/.mclaude/`. Th
 
 ## Security
 
-mclaude keeps your host **clean**, it is **not a sandbox**. The container gets the host's
-Docker socket (`/var/run/docker.sock`) and `claude` has passwordless sudo inside it — anything
+mclaude keeps your host **clean**, it is **not a sandbox**. The container user has passwordless
+sudo inside the container, and everything below the mounted directory is writable.
+
+The host's Docker socket is **not** mounted by default. A [trusted area](#trusted-areas) can
+opt in to it (see [Docker inside mclaude](#docker-inside-mclaude)). With the socket, anything
 running in the container can start privileged containers and thus act as root on the host.
-Treat it with the same trust as running Claude Code directly on the host.
+Treat such an area with the same trust as running Claude Code directly on the host. The
+long-running container always gets the socket (see `docker-compose.yml`).
 
 ## Requirements
 
@@ -55,21 +60,56 @@ echo "Summarize the README" | mclaude -p      # args + piped input pass through 
 
 Refuses to start from `$HOME` (avoids mounting your whole home).
 
-### Mount roots
+### Trusted areas
 
-By default only `$PWD` is mounted. To give Claude a wider view, list "mount roots" in
-`~/.mclaude/mount-roots` — one absolute path per line, `~` allowed, `#` comments and blank lines ignored:
+By default only `$PWD` is mounted. To give Claude a wider view, list "trusted areas" in
+`~/.mclaude/trusted_areas`. One area per line, fields separated by `|` (trailing fields optional),
+`#` comments and blank lines ignored:
 
 ```
-# mount the whole tree when mclaude runs anywhere below it
-~/MyGits
-/srv/work
+# path          | extra docker run args
+~/MyGits        | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
+~/web           | -p 8080:8080 -e FOO=bar
+/srv/my work    | --network host
+~/customer-x
 ```
 
-If `$PWD` is a root or lies below one, that root is mounted (same path) while Claude still
-starts in `$PWD`. With nested roots the longest match wins; `/a/b` never matches `/a/bc`.
-A root of `/` or `$HOME` is refused. No match → just `$PWD`, as before. On first run `mclaude`
-creates the file as a commented-out template (no active entries); uncomment or add your roots.
+- **path** — absolute, `~` allowed. If `$PWD` is the area or lies below it, the area is mounted
+  (same path) while Claude still starts in `$PWD`. With nested areas the longest match wins;
+  `/a/b` never matches `/a/bc`. An area of `/` or `$HOME` is refused. No match → just `$PWD`.
+- **extra docker run args** — appended to `docker run` (before the image) when this area matches.
+  Only the args of the winning (longest) match are used. They are split on whitespace; there is
+  no quoting and no globbing, so values with spaces are not possible. A `~/` at the start of a
+  word or right after `:` or `=` means `$HOME` (`-v ~/a:/b`, `--env=DIR=~/x`); nothing else is
+  expanded.
+
+`|` must not appear in a path or an argument; further fields may be added later. On first run
+`mclaude` creates the file as a commented-out template (no active entries). The former
+`~/.mclaude/mount-roots` is no longer read.
+
+### Docker inside mclaude
+
+The Docker CLI (with the `buildx` and `compose` plugins) is in the image, but it only works
+where the host's socket is mounted. Enable it per trusted area, together with the Docker client
+config that holds the registry credentials:
+
+```
+~/MyGits | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
+```
+
+To push to a registry, log in once **inside** the container. The credentials persist in
+`~/.mclaude/.docker/config.json` on the host and are shared by all areas that mount it:
+
+```bash
+docker login                     # Docker Hub: use an access token, not your password
+docker login registry.example.com
+docker push unimock/foo:1.0      # or ./push.sh for multi-arch builds
+```
+
+The host's own `~/.docker` is deliberately not used: credential helpers such as `desktop`,
+`pass` or `secretservice` don't exist in the container. Inside, `docker login` stores the
+credentials **base64-encoded, not encrypted** (file mode 600). `mclaude` creates
+`~/.mclaude/.docker/` with mode 700.
 
 ## Long-running mode
 
@@ -81,6 +121,8 @@ creates the file as a commented-out template (no active entries); uncomment or a
       CLAUDE_WORKDIR: /home/youruser/MyGits   # = working_dir
       CLAUDE_UID: "1000"                       # id -u
       CLAUDE_GID: "1000"                       # id -g
+      CLAUDE_USER: youruser                    # id -un
+      CLAUDE_GROUP: yourgroup                  # id -gn
     volumes:
       - /home/youruser/MyGits:/home/youruser/MyGits
 ```
@@ -92,14 +134,15 @@ Workspace is mounted at the **same path** inside the container. Defaults: `TZ=UT
 ```bash
 mkdir -p ~/.mclaude/.claude
 touch ~/.mclaude/.claude.json     # must exist as a FILE before first start (see note below)
-touch ~/.gitconfig                # likewise (wrapper mode touches both automatically)
+cp ~/.gitconfig ~/.mclaude/.gitconfig   # likewise a FILE (or touch it); wrapper mode does both automatically
+mkdir -p ~/.mclaude/.ssh ~/.mclaude/.docker
 ```
 
 **3. Run:**
 
 ```bash
 docker compose up -d
-docker compose exec -u claude mclaude bash    # land in the workspace, then run `claude`
+docker compose exec -u youruser mclaude bash    # land in the workspace, then run `claude`
 docker compose down
 ```
 
@@ -113,7 +156,7 @@ Pre-shared-key only — no passwords, no root.
 mkdir -p ~/.mclaude/.longrunning
 cat ~/.ssh/id_ed25519.pub >> ~/.mclaude/.longrunning/authorized-keys
 docker compose up -d                          # picks up the key
-ssh -p 2222 claude@<docker-host>
+ssh -p 2222 youruser@<docker-host>   # the host user name (CLAUDE_USER)
 ```
 
 Host keys are generated on first start and persisted (stable identity, no host-key warnings).
@@ -130,17 +173,17 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 | `docker compose build` | Build `unimock/mclaude:latest` (host arch) |
 | `docker compose up -d` | Start the long-running container |
 | `docker compose down` | Stop and remove it |
-| `docker compose exec -u claude mclaude bash` | Shell into the running container |
+| `docker compose exec -u youruser mclaude bash` | Shell into the running container |
 | `docker compose run --rm mclaude bash` | One-off throwaway shell |
-| `docker buildx bake --push` | Build+push multi-arch (see [below](#versioning--multi-arch-builds)) |
+| `./push.sh` | Build+push multi-arch `:latest` + `:$VERSION` (see [below](#versioning--multi-arch-builds)) |
 
 ## Architecture
 
-- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` (or its matching [mount root](#mount-roots)) at the same path and starts claude in `$PWD`; passes `CLAUDE_UID`/`CLAUDE_GID`; mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json` and the Docker socket; allocates a TTY only when interactive.
-- **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID, adds it to the Docker-socket group, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
-- **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state/socket as wrapper mode, forwards port `2222`. Workspace path, UID/GID and SSH port are literals in the file (no `.env`).
-- **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers claude`, keys read from `~/.mclaude/.longrunning`.
-- **`Dockerfile`** — `debian:trixie-slim`; Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI, openssh-client/server, vim, python3(+pip/venv), g++, shellcheck; Claude Code via `npm install -g`; `claude` owns npm globals; passwordless sudo; `~/.local/bin/claude` symlink for `/doctor`.
+- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` (or its matching [trusted area](#trusted-areas), plus that area's extra `docker run` args) at the same path and starts claude in `$PWD`; passes `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER`/`CLAUDE_GROUP`; creates and mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json`, `~/.mclaude/.gitconfig` (seeded from `~/.gitconfig`), `~/.mclaude/.ssh` (the Docker socket and `~/.mclaude/.docker` only via a trusted area); allocates a TTY only when interactive.
+- **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID and renames user/group to the host names (keeps `claude` if a name is invalid or already taken in the image; if the host GID already belongs to an image group, e.g. `100` = `users`, that group becomes the primary group), grants passwordless sudo, adds the user to the Docker-socket group, generates `~/.ssh/id_ed25519` if missing, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
+- **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state as wrapper mode plus, always, the Docker socket and `~/.mclaude/.docker`, forwards port `2222`. Workspace path, UID/GID, user/group names and SSH port are literals in the file (no `.env`).
+- **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers` = the host user (set by `claude-wrapper` at runtime), keys read from `~/.mclaude/.longrunning`.
+- **`Dockerfile`** — `debian:trixie-slim`; Node.js, npm, git, ripgrep, fd-find, jq, Docker CLI (+buildx, compose), openssh-client/server, vim, python3(+pip/venv), g++, shellcheck, ping; Claude Code via `npm install -g`; `claude` owns npm globals; passwordless sudo; `~/.local/bin/claude` symlink for `/doctor`.
 
 ## State and configuration
 
@@ -148,10 +191,12 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 |----------------------------|---------------------------------------|---------------------------------|
 | `~/.mclaude/.claude/`      | `/home/claude/.claude/`               | Config, memory, sessions        |
 | `~/.mclaude/.claude.json`  | `/home/claude/.claude.json`           | Primary state: login/OAuth, onboarding, projects, MCP |
-| `~/.gitconfig`             | `/home/claude/.gitconfig`             | Git identity                    |
-| `~/.mclaude/mount-roots`   | —                                     | Optional wrapper-mode [mount roots](#mount-roots) (read by `mclaude` on the host) |
+| `~/.mclaude/.gitconfig`    | `/home/claude/.gitconfig`             | Git identity (first run: copied from `~/.gitconfig`) |
+| `~/.mclaude/.ssh/`         | `/home/claude/.ssh/`                  | SSH client keys; `id_ed25519` generated if missing — add `id_ed25519.pub` to GitHub & co. |
+| `~/.mclaude/.docker/`      | `/home/claude/.docker/`               | Docker client config + registry creds (`docker login`); trusted area / long-running only |
+| `~/.mclaude/trusted_areas` | —                                     | Optional wrapper-mode [trusted areas](#trusted-areas) (read by `mclaude` on the host) |
 | `~/.mclaude/.longrunning/` | `/home/claude/.mclaude/.longrunning/` | sshd keys + authorized-keys     |
-| `$PWD` or mount root       | same path                             | Project files                   |
+| `$PWD` or trusted area     | same path                             | Project files                   |
 
 All state lives under `~/.mclaude/` on the host and persists across runs.
 
@@ -168,7 +213,7 @@ All state lives under `~/.mclaude/` on the host and persists across runs.
 mclaude has **no version of its own** — it tracks the [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code)
 CLI release it bundles. The **`VERSION`** file is the single source of truth: it holds the exact
 `@anthropic-ai/claude-code` version to install (e.g. `2.1.296`), which the Dockerfile pins and which
-becomes the image tag, `MCLAUDE_VERSION` env var and OCI `version` label. No git, no scripts.
+becomes the image tag, `MCLAUDE_VERSION` env var and OCI `version` label.
 
 Two build vars read by `docker-compose.yml` carry it into the image:
 
@@ -203,9 +248,13 @@ step 3 to publish.
 
 ```bash
 docker login
-docker buildx create --name mclaude-builder --driver docker-container --bootstrap --use
-docker buildx bake --push                     # pushes :latest + :$VERSION to Docker Hub
+./push.sh                                     # pushes :latest + :$VERSION to Docker Hub
 ```
+
+`push.sh` sets `VERSION`/`BUILD_DATE` itself from the `VERSION` file (step 1's exports are only
+needed for `docker compose build`), creates the `mclaude-builder` buildx builder if missing, and
+refuses to push unless bake resolved the `:$VERSION` tag — a bare `docker buildx bake --push` in a
+shell without `VERSION` would silently push `:latest` + `:dev`. Extra args go to `docker buildx bake`.
 
 (Edit `tags` in `docker-compose.yml` to push under a different name.)
 
@@ -226,9 +275,9 @@ mclaude --version                             # Claude Code's own version — no
 
 ## Adding dependencies
 
-Permanent — add to the first `RUN` block in the `Dockerfile`, then `docker compose build` (or `docker buildx bake --push`).
+Permanent — add to the first `RUN` block in the `Dockerfile`, then `docker compose build` (or `./push.sh`).
 
-Runtime (lost on container recreate; `claude` has passwordless sudo):
+Runtime (lost on container recreate; the container user has passwordless sudo):
 
 ```bash
 sudo apt-get update && sudo apt-get install <pkg>          # apt: update first
