@@ -7,11 +7,31 @@
 MCLAUDE_VERSION="2.1.314"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
-# `mclaude --version` passes through to claude itself; this reports the wrapper/image build.
-if [ "$1" = "--mclaude-version" ]; then
-  echo "mclaude ${MCLAUDE_VERSION}"
-  exit 0
-fi
+# mclaude's own options (--mclaude-*) may appear anywhere among the args; they are
+# taken out here and everything else passes through to claude unchanged.
+#   --mclaude-version       report the wrapper/image build (`--version` is claude's)
+#   --mclaude-docker        mount the host's Docker socket + ~/.mclaude/.docker
+#   --mclaude-host-network  run the container with `--network host`
+OPT_DOCKER=
+OPT_HOST_NETWORK=
+n=$#
+while [ "$n" -gt 0 ]; do
+  case "$1" in
+    --mclaude-version)
+      echo "mclaude ${MCLAUDE_VERSION}"
+      exit 0
+      ;;
+    --mclaude-docker)       OPT_DOCKER=1 ;;
+    --mclaude-host-network) OPT_HOST_NETWORK=1 ;;
+    --mclaude-*)
+      echo "mclaude: unknown option '$1'" >&2
+      exit 2
+      ;;
+    *) set -- "$@" "$1" ;;
+  esac
+  shift
+  n=$((n - 1))
+done
 
 if [ "$PWD" = "$HOME" ]; then
   echo "Error: claude must not be run from the home directory." >&2
@@ -23,8 +43,8 @@ fi
 # still starts in $PWD (CLAUDE_WORKDIR), but sees the whole tree. Each line is
 # `path | extra docker run args` (fields split on `|`, trailing fields optional,
 # `~` allowed, `#` comments). The longest matching entry wins, and only its args
-# are used. Nothing extra (e.g. the Docker socket) is mounted unless an area's
-# args ask for it.
+# are used. Nothing extra (e.g. the Docker socket or a .gitconfig) is mounted
+# unless an area's args or a --mclaude-* option ask for it.
 MOUNT_DIR="$PWD"
 EXTRA_ARGS=
 TRUSTED_AREAS_FILE="$HOME/.mclaude/trusted_areas"
@@ -46,14 +66,19 @@ if [ ! -e "$TRUSTED_AREAS_FILE" ]; then
 # ~/ at the start of a word or right after `:` or `=` also means $HOME.
 #
 # Docker inside the container (socket + registry creds for `docker login`/push)
-# is opt-in per area; the socket makes the area root-equivalent on the host:
+# is opt-in per area (or per run with --mclaude-docker); the socket makes the
+# area root-equivalent on the host:
 #   -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
 #
+# No .gitconfig is mounted by default; mount one per area (the source file
+# must exist, else Docker creates a root-owned directory in its place):
+#   -v ~/.mclaude/.gitconfig:/home/claude/.gitconfig
+#
 # Examples:
-#~/MyGits      | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
+#~/MyGits      | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker -v ~/.mclaude/.gitconfig:/home/claude/.gitconfig
 #~/web         | -p 8080:8080 -e FOO=bar
 #/srv/my work  | --network host
-#~/customer-x
+#~/customer-x  | -v ~/.mclaude/gitconfig.customer-x:/home/claude/.gitconfig
 EOT
 fi
 
@@ -129,6 +154,25 @@ if [ -f "$TRUSTED_AREAS_FILE" ]; then
   fi
 fi
 
+# Command-line opt-ins. Skipped where the area's args already contain the same
+# mount/network, since Docker refuses a duplicate mount point.
+if [ -n "$OPT_DOCKER" ]; then
+  case " $EXTRA_ARGS " in
+    *':/var/run/docker.sock '*|*':/var/run/docker.sock:'*) ;;
+    *) EXTRA_ARGS="$EXTRA_ARGS -v /var/run/docker.sock:/var/run/docker.sock" ;;
+  esac
+  case " $EXTRA_ARGS " in
+    *':/home/claude/.docker '*|*':/home/claude/.docker:'*) ;;
+    *) EXTRA_ARGS="$EXTRA_ARGS -v ~/.mclaude/.docker:/home/claude/.docker" ;;
+  esac
+fi
+if [ -n "$OPT_HOST_NETWORK" ]; then
+  case " $EXTRA_ARGS " in
+    *' --network host '*|*' --network=host '*|*' --net host '*|*' --net=host '*) ;;
+    *) EXTRA_ARGS="$EXTRA_ARGS --network host" ;;
+  esac
+fi
+
 # Pre-create the config dir so Docker doesn't auto-create the bind-mount source
 # as a root-owned directory (which then needs an in-container chown to fix).
 mkdir -p "$HOME/.mclaude/.claude"
@@ -139,9 +183,10 @@ mkdir -p "$HOME/.mclaude/.claude"
 # auto-create it as a directory and claude would fail to write the JSON.
 [ -e "$HOME/.mclaude/.claude.json" ] || touch "$HOME/.mclaude/.claude.json"
 
-# The container's git identity lives in ~/.mclaude/.gitconfig. Create it before
-# mounting (else Docker auto-creates a root-owned directory); on first run seed it
-# from the host's ~/.gitconfig so the identity carries over.
+# ~/.mclaude/.gitconfig is NOT mounted by default; trusted areas mount it (or
+# their own file) via their args. Still seed it from the host's ~/.gitconfig on
+# first run, so an area referencing it finds a file (else Docker auto-creates a
+# root-owned directory) and the identity carries over.
 if [ ! -e "$HOME/.mclaude/.gitconfig" ]; then
   if [ -f "$HOME/.gitconfig" ]; then
     cp "$HOME/.gitconfig" "$HOME/.mclaude/.gitconfig"
@@ -155,7 +200,7 @@ mkdir -p "$HOME/.mclaude/.ssh"
 chmod 700 "$HOME/.mclaude/.ssh"
 
 # Docker client config / registry creds (`docker login` inside the container).
-# Only mounted when a trusted area asks for it, but created here so Docker never
+# Only mounted when a trusted area or --mclaude-docker asks for it, but created here so Docker never
 # auto-creates the mount source as a root-owned directory.
 mkdir -p "$HOME/.mclaude/.docker"
 chmod 700 "$HOME/.mclaude/.docker"
@@ -198,7 +243,6 @@ exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR" \
                          -e TERM="${TERM:-xterm-256color}" \
                          -e COLORTERM="${COLORTERM:-truecolor}" \
                          -v /etc/localtime:/etc/localtime:ro \
-                         -v "$HOME/.mclaude/.gitconfig":/home/claude/.gitconfig \
                          -v "$HOME/.mclaude/.ssh":/home/claude/.ssh \
                          -v "$HOME/.mclaude/.claude":/home/claude/.claude \
                          -v "$HOME/.mclaude/.claude.json":/home/claude/.claude.json \

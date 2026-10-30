@@ -23,8 +23,8 @@ Same image, same `claude-wrapper` entrypoint, same state under `~/.mclaude/`. Th
 mclaude keeps your host **clean**, it is **not a sandbox**. The container user has passwordless
 sudo inside the container, and everything below the mounted directory is writable.
 
-The host's Docker socket is **not** mounted by default. A [trusted area](#trusted-areas) can
-opt in to it (see [Docker inside mclaude](#docker-inside-mclaude)). With the socket, anything
+The host's Docker socket is **not** mounted by default. A [trusted area](#trusted-areas) or
+`mclaude --mclaude-docker` can opt in to it (see [Docker inside mclaude](#docker-inside-mclaude)). With the socket, anything
 running in the container can start privileged containers and thus act as root on the host.
 Treat such an area with the same trust as running Claude Code directly on the host. The
 long-running container always gets the socket (see `docker-compose.yml`).
@@ -56,6 +56,9 @@ cd ~/projects/my-project
 mclaude
 mclaude --help
 echo "Summarize the README" | mclaude -p      # args + piped input pass through to claude
+mclaude --mclaude-docker                      # this run: mount Docker socket + ~/.mclaude/.docker
+mclaude --mclaude-host-network                # this run: docker run --network host
+mclaude --mclaude-version                     # wrapper/image version (--version is claude's)
 ```
 
 Refuses to start from `$HOME` (avoids mounting your whole home).
@@ -68,10 +71,11 @@ By default only `$PWD` is mounted. To give Claude a wider view, list "trusted ar
 
 ```
 # path          | extra docker run args
-~/MyGits        | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
+~/MyGits        | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker -v ~/.mclaude/.gitconfig:/home/claude/.gitconfig
 ~/web           | -p 8080:8080 -e FOO=bar
 /srv/my work    | --network host
-~/customer-x
+~/customer-x    | -v ~/.mclaude/gitconfig.customer-x:/home/claude/.gitconfig
+~/scratch
 ```
 
 - **path** — absolute, `~` allowed. If `$PWD` is the area or lies below it, the area is mounted
@@ -83,6 +87,14 @@ By default only `$PWD` is mounted. To give Claude a wider view, list "trusted ar
   word or right after `:` or `=` means `$HOME` (`-v ~/a:/b`, `--env=DIR=~/x`); nothing else is
   expanded.
 
+`--mclaude-docker` and `--mclaude-host-network` add their mounts/flag on top of the area's args
+(skipped where the area already has them, since Docker refuses duplicate mount points).
+
+**Git config:** no `.gitconfig` is mounted by default, so git inside has no identity unless an
+area mounts one, e.g. `-v ~/.mclaude/.gitconfig:/home/claude/.gitconfig` (seeded from
+`~/.gitconfig` on first run) or a per-area file as for `~/customer-x` above. The source file
+must exist before the run; otherwise Docker creates a root-owned directory in its place.
+
 `|` must not appear in a path or an argument; further fields may be added later. On first run
 `mclaude` creates the file as a commented-out template (no active entries). The former
 `~/.mclaude/mount-roots` is no longer read.
@@ -90,8 +102,8 @@ By default only `$PWD` is mounted. To give Claude a wider view, list "trusted ar
 ### Docker inside mclaude
 
 The Docker CLI (with the `buildx` and `compose` plugins) is in the image, but it only works
-where the host's socket is mounted. Enable it per trusted area, together with the Docker client
-config that holds the registry credentials:
+where the host's socket is mounted. Enable it per run with `mclaude --mclaude-docker`, or per
+trusted area, together with the Docker client config that holds the registry credentials:
 
 ```
 ~/MyGits | -v /var/run/docker.sock:/var/run/docker.sock -v ~/.mclaude/.docker:/home/claude/.docker
@@ -179,7 +191,7 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 
 ## Architecture
 
-- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` (or its matching [trusted area](#trusted-areas), plus that area's extra `docker run` args) at the same path and starts claude in `$PWD`; passes `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER`/`CLAUDE_GROUP`; creates and mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json`, `~/.mclaude/.gitconfig` (seeded from `~/.gitconfig`), `~/.mclaude/.ssh` (the Docker socket and `~/.mclaude/.docker` only via a trusted area); allocates a TTY only when interactive.
+- **`mclaude`** (host launcher, `/usr/local/bin`) — refuses `$HOME`; bind-mounts `$PWD` (or its matching [trusted area](#trusted-areas), plus that area's extra `docker run` args) at the same path and starts claude in `$PWD`; passes `CLAUDE_UID`/`CLAUDE_GID`/`CLAUDE_USER`/`CLAUDE_GROUP`; creates and mounts `~/.mclaude/.claude`, `~/.mclaude/.claude.json`, `~/.mclaude/.ssh`; creates `~/.mclaude/.gitconfig` (seeded from `~/.gitconfig`) but mounts it only via a trusted area; the Docker socket and `~/.mclaude/.docker` only via a trusted area or `--mclaude-docker`, `--network host` via `--mclaude-host-network`; allocates a TTY only when interactive.
 - **`claude-wrapper`** (container entrypoint) — sets the `claude` UID/GID and renames user/group to the host names (keeps `claude` if a name is invalid or already taken in the image; if the host GID already belongs to an image group, e.g. `100` = `users`, that group becomes the primary group), grants passwordless sudo, adds the user to the Docker-socket group, generates `~/.ssh/id_ed25519` if missing, re-chowns npm globals, `cd`s into `CLAUDE_WORKDIR`, exec's `claude`. With `--keepalive` (long-running) it instead starts sshd and keeps the container alive (`tail -f /dev/null`).
 - **`docker-compose.yml`** (long-running service) — runs `claude-wrapper --keepalive`, mounts the workspace and the same state as wrapper mode plus, always, the Docker socket and `~/.mclaude/.docker`, forwards port `2222`. Workspace path, UID/GID, user/group names and SSH port are literals in the file (no `.env`).
 - **`sshd_config.mclaude`** — self-contained sshd config: key-only, no root, `AllowUsers` = the host user (set by `claude-wrapper` at runtime), keys read from `~/.mclaude/.longrunning`.
@@ -191,9 +203,9 @@ Host keys are generated on first start and persisted (stable identity, no host-k
 |----------------------------|---------------------------------------|---------------------------------|
 | `~/.mclaude/.claude/`      | `/home/claude/.claude/`               | Config, memory, sessions        |
 | `~/.mclaude/.claude.json`  | `/home/claude/.claude.json`           | Primary state: login/OAuth, onboarding, projects, MCP |
-| `~/.mclaude/.gitconfig`    | `/home/claude/.gitconfig`             | Git identity (first run: copied from `~/.gitconfig`) |
+| `~/.mclaude/.gitconfig`    | `/home/claude/.gitconfig`             | Git identity (first run: copied from `~/.gitconfig`); wrapper mode: only where a trusted area mounts it |
 | `~/.mclaude/.ssh/`         | `/home/claude/.ssh/`                  | SSH client keys; `id_ed25519` generated if missing — add `id_ed25519.pub` to GitHub & co. |
-| `~/.mclaude/.docker/`      | `/home/claude/.docker/`               | Docker client config + registry creds (`docker login`); trusted area / long-running only |
+| `~/.mclaude/.docker/`      | `/home/claude/.docker/`               | Docker client config + registry creds (`docker login`); trusted area / `--mclaude-docker` / long-running only |
 | `~/.mclaude/trusted_areas` | —                                     | Optional wrapper-mode [trusted areas](#trusted-areas) (read by `mclaude` on the host) |
 | `~/.mclaude/.longrunning/` | `/home/claude/.mclaude/.longrunning/` | sshd keys + authorized-keys     |
 | `$PWD` or trusted area     | same path                             | Project files                   |
