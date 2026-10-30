@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
     npm \
     git \
+    git-lfs \
     curl \
     ca-certificates \
     gpg \
@@ -26,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     shellcheck \
     iputils-ping \
     socat \
+    && git lfs install --system \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # add more dependencies above if needed
 
