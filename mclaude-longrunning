@@ -1,0 +1,59 @@
+#!/bin/sh -e
+
+# Long-running container entrypoint: map the image user onto the host user
+# (setup.sh from the unimock/mclaude base image sets RUN_USER), start sshd and
+# keep the container alive. You then log in via SSH or
+# `docker compose exec -u <user> mclaude bash` and run `claude` inside.
+# shellcheck source=/dev/null
+. /usr/local/lib/mclaude/setup.sh
+
+# Bring up an SSH daemon so you can `ssh <user>@host` into the container instead
+# of `docker exec`. Login is pre-shared-key only (see
+# /etc/ssh/sshd_config.mclaude). Host keys and the authorized-keys file live in
+# the mounted ~/.mclaude/area/longrunning/sshd volume so they persist.
+start_sshd() {
+    LRDIR=/home/claude/.mclaude/sshd
+    HOSTKEYS="$LRDIR/hostkeys"
+    AUTHKEYS="$LRDIR/authorized-keys"
+
+    mkdir -p "$HOSTKEYS"
+
+    # Generate persistent host keys on first start (kept in the volume).
+    [ -f "$HOSTKEYS/ssh_host_ed25519_key" ] || \
+        ssh-keygen -q -t ed25519 -f "$HOSTKEYS/ssh_host_ed25519_key" -N ''
+    [ -f "$HOSTKEYS/ssh_host_rsa_key" ] || \
+        ssh-keygen -q -t rsa -b 4096 -f "$HOSTKEYS/ssh_host_rsa_key" -N ''
+    chmod 700 "$HOSTKEYS"
+    chmod 600 "$HOSTKEYS"/ssh_host_*_key
+
+    # start_sshd runs as root, so mkdir/ssh-keygen above leave these files
+    # root-owned in the host's volume. Hand them back to the host user
+    # (CLAUDE_UID:CLAUDE_GID; 0:0 == no-op for a root host) so the persisted
+    # keys aren't root-owned on the host. sshd still runs as root and reads the
+    # 600 keys fine regardless of owner.
+    chown -R "$CLAUDE_UID:$CLAUDE_GID" "$LRDIR"
+
+    # SSH starts a login shell in $HOME; drop a profile snippet so logins land
+    # in the workspace directory instead (matches docker-compose's working_dir,
+    # which only applies to PID 1 / `docker exec`, not to the sshd session).
+    printf 'cd "%s" 2>/dev/null || true\n' "$CLAUDE_WORKDIR" \
+        > /etc/profile.d/mclaude-workdir.sh
+
+    # Privilege-separation directory required by sshd.
+    mkdir -p /run/sshd
+
+    if [ ! -s "$AUTHKEYS" ]; then
+        echo "mclaude: no public keys in $AUTHKEYS — SSH login is refused until you add one." >&2
+        echo "mclaude: append a key on the host, e.g. cat ~/.ssh/id_ed25519.pub >> ~/.mclaude/area/longrunning/sshd/authorized-keys" >&2
+    fi
+
+    # Run in the foreground (-D) as a background job so its logs reach the
+    # container's stderr (docker compose logs); PID 1 stays tail -f /dev/null.
+    # The login user is only known at runtime, hence AllowUsers here and not in
+    # the config file.
+    /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config.mclaude -o AllowUsers="$RUN_USER" &
+    echo "mclaude: sshd started (pre-shared-key login as '$RUN_USER')." >&2
+}
+
+start_sshd
+exec tail -f /dev/null

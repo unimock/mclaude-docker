@@ -1,96 +1,36 @@
-FROM debian:trixie-slim
+# Long-running mclaude: the unimock/mclaude image (Claude Code, tools, user
+# setup) plus an SSH daemon and a keepalive entrypoint.
+# Versioning: VERSION is the unimock/mclaude tag to build on (= the bundled
+# Claude Code release), passed in by `docker buildx bake`.
+ARG MCLAUDE_VERSION=latest
+FROM unimock/mclaude:${MCLAUDE_VERSION}
 
 # Build-time only (ARG, not ENV): no interactive apt prompts during the build.
 ARG DEBIAN_FRONTEND=noninteractive
 
+# The package generates host keys in /etc/ssh; drop them, ours live in the
+# mounted volume (see sshd_config.mclaude).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nodejs \
-    npm \
-    git \
-    git-lfs \
-    curl \
-    ca-certificates \
-    gpg \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ripgrep \
-    fd-find \
-    jq \
-    openssh-client \
     openssh-server \
-    sudo \
-    vim \
-    bash \
-    tzdata \
-    g++ \
-    shellcheck \
-    iputils-ping \
-    socat \
-    && git lfs install --system \
+    && rm -f /etc/ssh/ssh_host_* \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # add more dependencies above if needed
 
-# Docker CLI + buildx/compose plugins from Docker's Debian repository (codename
-# read from os-release). Only usable where the socket is mounted (trusted area).
-RUN install -m 0755 -d /etc/apt/keyrings && \
-    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
-    . /etc/os-release && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" \
-      > /etc/apt/sources.list.d/docker.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-      docker-ce-cli docker-buildx-plugin docker-compose-plugin && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Create the working user (UID/GID are remapped to the host user at runtime).
-RUN useradd -m --shell /bin/bash --home-dir /home/claude claude
-
-# Let claude install packages (apt, pip, ...) without a password prompt.
-RUN echo "claude ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/claude && \
-    chmod 0440 /etc/sudoers.d/claude
-# Versioning: mclaude tracks the Claude Code CLI version it bundles — the VERSION
-# file IS the pinned @anthropic-ai/claude-code release. Passed in by `docker compose
-# build` from that file. Declared here (not earlier) so a version bump reinstalls
-# Claude Code + rebuilds the layers below, but keeps the apt layers above cached.
-# A `dev` fallback (no version passed) installs the latest release instead.
-ARG MCLAUDE_VERSION=dev
-RUN if [ "$MCLAUDE_VERSION" = "dev" ]; then \
-      npm install -g @anthropic-ai/claude-code; \
-    else \
-      npm install -g @anthropic-ai/claude-code@"$MCLAUDE_VERSION"; \
-    fi && \
-    npm cache clean --force && \
-    chown -R claude:claude /usr/local/lib/node_modules /usr/local/bin /usr/local/share/man
-# ^ Let the claude user manage global npm packages (npm install -g, claude update)
-#   without sudo. The chown must stay in the same RUN as the install: in a layer of
-#   its own it would copy the whole node_modules tree into the image a second time.
-
-# Satisfy the claude /doctor check which expects claude at ~/.local/bin/claude
-RUN mkdir -p /home/claude/.local/bin && \
-    ln -s /usr/local/bin/claude /home/claude/.local/bin/claude && \
-    chown -R claude:claude /home/claude/.local
-
-# Inside the long-running container there is no Docker wrapper to call, but
+# Inside the long-running container there is no Docker launcher to call, but
 # muscle memory says `mclaude` — make it an alias for claude.
 RUN ln -s /usr/local/bin/claude /usr/local/bin/mclaude
 
-ENV PATH="/usr/local/bin:$PATH"
-ENV SHELL=/bin/bash
-
-# Expose the bundled Claude Code version both as an env var (readable inside the
-# container) and as OCI labels (readable via `docker inspect` / `mclaude
-# --mclaude-version`). MCLAUDE_VERSION is already in scope from the ARG above.
+# The ARG before FROM is out of scope here; redeclare it for the labels.
+# (ENV MCLAUDE_VERSION comes from the base image.)
+ARG MCLAUDE_VERSION
 ARG BUILD_DATE=unknown
-ENV MCLAUDE_VERSION=$MCLAUDE_VERSION
-LABEL org.opencontainers.image.title="mclaude" \
-      org.opencontainers.image.description="Dockerized Claude Code wrapper" \
+LABEL org.opencontainers.image.title="mclaude-docker" \
+      org.opencontainers.image.description="Long-running mclaude container with sshd" \
       org.opencontainers.image.source="https://github.com/unimock/mclaude-docker" \
       org.opencontainers.image.version="$MCLAUDE_VERSION" \
       org.opencontainers.image.created="$BUILD_DATE"
 
-WORKDIR /src
-COPY claude-wrapper /usr/local/bin/
-# Self-contained sshd config for long-running mode (pre-shared-key login only).
+# Self-contained sshd config (pre-shared-key login only).
 COPY sshd_config.mclaude /etc/ssh/sshd_config.mclaude
-CMD ["/usr/local/bin/claude-wrapper"]
-
+COPY mclaude-longrunning /usr/local/bin/
+CMD ["/usr/local/bin/mclaude-longrunning"]

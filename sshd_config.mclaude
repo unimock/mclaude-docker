@@ -1,28 +1,28 @@
 # mclaude long-running SSH daemon — pre-shared-key login ONLY.
 #
-# Started by claude-wrapper in --keepalive mode (see start_sshd()). sshd is run
+# Started by mclaude-longrunning (see start_sshd()). sshd is run
 # with `-f` pointing at this file, so the distro's /etc/ssh/sshd_config and its
 # drop-ins are bypassed entirely and these settings are authoritative.
 
 Port 22
 AddressFamily any
 
-# Host keys live in the mounted volume (~/.mclaude/.longrunning/hostkeys on the
-# host) so the container's identity is stable across rebuilds and restarts.
-# claude-wrapper generates them on first start.
-HostKey /home/claude/.mclaude/.longrunning/hostkeys/ssh_host_ed25519_key
-HostKey /home/claude/.mclaude/.longrunning/hostkeys/ssh_host_rsa_key
+# Host keys live in the mounted volume (~/.mclaude/area/longrunning/sshd/hostkeys
+# on the host) so the container's identity is stable across rebuilds and
+# restarts. mclaude-longrunning generates them on first start.
+HostKey /home/claude/.mclaude/sshd/hostkeys/ssh_host_ed25519_key
+HostKey /home/claude/.mclaude/sshd/hostkeys/ssh_host_rsa_key
 
 # --- Authentication: public key, and nothing else. ---
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
-AuthorizedKeysFile /home/claude/.mclaude/.longrunning/authorized-keys
+AuthorizedKeysFile /home/claude/.mclaude/sshd/authorized-keys
 
 # Only the working user may log in; root login is never allowed.
 PermitRootLogin no
-# AllowUsers is set by claude-wrapper on the sshd command line (the login
+# AllowUsers is set by mclaude-longrunning on the sshd command line (the login
 # user is the host user name, only known at runtime).
 
 # The authorized-keys file and its parents come from a bind mount, so their

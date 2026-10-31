@@ -1,31 +1,16 @@
-# Long-running mclaude container + the image build definition.
-#   Build: docker compose build      Run: docker compose up -d
+# Long-running mclaude container (image built via docker-bake.hcl / push.sh).
+#   Run: docker compose up -d
 # Edit the workspace path / UID / GID / user / group below to match your host
 # (id -u, id -g, id -un, id -gn).
 services:
   mclaude:
-    image: "unimock/mclaude:latest"
-    build:
-      context: .
-      # docker compose build uses these tags; docker buildx bake reads x-bake.
-      tags:
-        - "unimock/mclaude:latest"
-        - "unimock/mclaude:${VERSION:-dev}"
-      # Version (from the VERSION file) + build date baked into the MCLAUDE_VERSION
-      # env var and OCI labels.
-      args:
-        MCLAUDE_VERSION: "${VERSION:-dev}"
-        BUILD_DATE: "${BUILD_DATE:-unknown}"
-      x-bake:
-        platforms:
-          - linux/amd64
-          - linux/arm64
+    image: "unimock/mclaude-docker:latest"
     container_name: mclaude
     hostname: mclaude
     # tini reaps the keepalive process so `compose down` stops instantly.
     init: true
-    # Root sets up UID/GID, then keeps the container alive; you run claude yourself.
-    command: ["/usr/local/bin/claude-wrapper", "--keepalive"]
+    # Root sets up UID/GID, starts sshd, then keeps the container alive; you run
+    # claude yourself (image CMD: mclaude-longrunning).
     # Workspace bind-mounted at the SAME path so absolute paths line up.
     working_dir: /home/youruser/MyGits
     environment:
@@ -34,6 +19,7 @@ services:
       CLAUDE_GID: "1000"
       CLAUDE_USER: youruser      # id -un
       CLAUDE_GROUP: yourgroup    # id -gn
+      MCLAUDE_AREA: longrunning
       TZ: UTC
       TERM: xterm-256color
       COLORTERM: truecolor
@@ -42,18 +28,21 @@ services:
       - "2222:22"
     volumes:
       - /home/youruser/MyGits:/home/youruser/MyGits
-      - ${HOME}/.mclaude/.gitconfig:/home/claude/.gitconfig
-      # SSH client keys (generated on first start if missing).
-      - ${HOME}/.mclaude/.ssh:/home/claude/.ssh
       - ${HOME}/.mclaude/.claude:/home/claude/.claude
       # Claude's primary state file (login/OAuth, onboarding, projects, MCP).
       # Must already exist as a FILE on the host, else Docker creates a dir here
       # and claude fails to write it: touch ~/.mclaude/.claude.json
       - ${HOME}/.mclaude/.claude.json:/home/claude/.claude.json
-      - ${HOME}/.mclaude/.longrunning:/home/claude/.mclaude/.longrunning
+      # Area "longrunning" (no area.conf, so the host launcher ignores it).
+      # The .gitconfig must exist as a FILE, like .claude.json above.
+      - ${HOME}/.mclaude/area/longrunning/.gitconfig:/home/claude/.gitconfig
+      # SSH client keys (generated on first start if missing).
+      - ${HOME}/.mclaude/area/longrunning/.ssh:/home/claude/.ssh
+      # sshd host keys + authorized-keys.
+      - ${HOME}/.mclaude/area/longrunning/sshd:/home/claude/.mclaude/sshd
       # Docker inside the container: the host socket (root-equivalent on the host)
       # and the Docker client config with registry creds (`docker login` inside).
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${HOME}/.mclaude/.docker:/home/claude/.docker
+      - ${HOME}/.mclaude/area/longrunning/.docker:/home/claude/.docker
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
